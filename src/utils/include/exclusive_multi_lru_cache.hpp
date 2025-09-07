@@ -22,6 +22,7 @@
 #include <string>
 #include <utility>
 #include <type_traits>
+#include <iostream>
 
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/vector.hpp"
@@ -66,44 +67,91 @@ public:
 	// 1. Caller is able to do processing for the value.
 	// 2. For thread-safe lru cache, processing could be moved out of critical section.
 	unique_ptr<Val> Put(Key key, unique_ptr<Val> value) {
+		std::cout << "[PUT] START: cur_entries_num=" << cur_entries_num << " max_entries=" << max_entries << std::endl;
+		
+		// Add to front of LRU list (most recent)
 		lru_list.emplace_front(key);
+		std::cout << "[PUT] Added key to LRU front, list size=" << lru_list.size() << std::endl;
+		
 		Entry new_entry {
 		    .value = std::move(value),
 		    .timestamp = static_cast<uint64_t>(GetSteadyNowMilliSecSinceEpoch()),
 		    .lru_iterator = lru_list.begin(),
 		};
+		
 		auto key_cref = std::cref(lru_list.front());
-		entry_map[key_cref].emplace_back(std::move(new_entry));
+		auto& entries = entry_map[key_cref];
+		entries.emplace_back(std::move(new_entry));
 		++cur_entries_num;
+		
+		std::cout << "[PUT] Added entry to map, entries_for_key=" << entries.size() << " total_entries=" << cur_entries_num << std::endl;
 
 		unique_ptr<Val> evicted_val = nullptr;
 		if (max_entries > 0 && cur_entries_num > max_entries) {
+			std::cout << "[PUT] EVICTION NEEDED: cur_entries_num=" << cur_entries_num << " > max_entries=" << max_entries << std::endl;
+			
 			const auto &stale_key = lru_list.back();
+			std::cout << "[PUT] Found LRU (stale) key at back of LRU list" << std::endl;
+			
 			auto iter = entry_map.find(stale_key);
 			D_ASSERT(iter != entry_map.end());
+			
+			std::cout << "[PUT] Found stale key in entry_map, entries_for_stale_key=" << iter->second.size() << std::endl;
+			
+			// CRITICAL BUG CHECK: Are we evicting the correct entry?
+			auto lru_back_iter = std::prev(lru_list.end());
+			auto front_iter = iter->second.front().lru_iterator;
+			bool is_correct_eviction = (lru_back_iter == front_iter);
+			
+			std::cout << "[PUT] *** BUG CHECK *** entries.size()=" << iter->second.size() 
+			          << " LRU_back==front_iter=" << is_correct_eviction << std::endl;
+			
+			if (!is_correct_eviction && iter->second.size() > 1) {
+				std::cout << "[PUT] *** WRONG EVICTION DETECTED! *** We should evict LRU entry but will evict front entry instead!" << std::endl;
+				std::cout << "[PUT] This is the root cause of the segfault bug!" << std::endl;
+			}
+			
 			evicted_val = DeleteFirstEntry(iter);
 		}
+		
+		std::cout << "[PUT] END: evicted=" << (evicted_val ? "yes" : "no") << std::endl;
 		return evicted_val;
 	}
 
 	// Look up the entry with key `key` and remove from cache.
 	// If there're multiple values corresponds to the given [key]. the oldest value will be returned.
 	GetAndPopResult GetAndPop(const Key &key) {
+		std::cout << "[GET_AND_POP] START" << std::endl;
 		GetAndPopResult result;
 
 		const auto entry_map_iter = entry_map.find(key);
 		if (entry_map_iter == entry_map.end()) {
+			std::cout << "[GET_AND_POP] Key not found" << std::endl;
 			return result;
 		}
 
 		// There're multiple entries correspond to the given [key], check whether they're stale one by one.
 		auto &entries = entry_map_iter->second;
+		std::cout << "[GET_AND_POP] Found key with " << entries.size() << " entries" << std::endl;
 		if (timeout_millisec > 0) {
 			const auto now = GetSteadyNowMilliSecSinceEpoch();
 			size_t cur_entries_size = entries.size();
+			std::cout << "[GET_AND_POP] Checking for stale entries, timeout=" << timeout_millisec << "ms" << std::endl;
+			
+			// BUG: This loop condition is wrong! Should check entries.empty(), not cur_entries_num > 0
 			while (cur_entries_num > 0) {
+				if (entries.empty()) {
+					std::cout << "[GET_AND_POP] *** BUG TRIGGERED *** entries is empty but cur_entries_num=" << cur_entries_num << std::endl;
+					std::cout << "[GET_AND_POP] This can cause undefined behavior accessing entries.front()!" << std::endl;
+					break;
+				}
+				
 				auto &cur_entry = entries.front();
-				if (now - cur_entry.timestamp > timeout_millisec) {
+				auto age_ms = now - cur_entry.timestamp;
+				std::cout << "[GET_AND_POP] Checking entry age=" << age_ms << "ms vs timeout=" << timeout_millisec << "ms" << std::endl;
+				
+				if (age_ms > timeout_millisec) {
+					std::cout << "[GET_AND_POP] Entry is stale, removing via DeleteFirstEntry" << std::endl;
 					result.evicted_items.emplace_back(DeleteFirstEntry(entry_map_iter));
 					--cur_entries_size;
 					continue;
@@ -113,14 +161,17 @@ public:
 
 			// If there're no left entries correspond to the given [key], we directly return.
 			if (cur_entries_size == 0) {
+				std::cout << "[GET_AND_POP] All entries were stale, returning empty result" << std::endl;
 				return result;
 			}
 		}
 
 		// There're still fresh entry for the given [key].
 		D_ASSERT(!entries.empty());
+		std::cout << "[GET_AND_POP] Getting target item and removing entry" << std::endl;
 		result.target_item = std::move(entries.front().value);
 		DeleteFirstEntry(entry_map_iter);
+		std::cout << "[GET_AND_POP] END: found_item=yes" << std::endl;
 		return result;
 	}
 
@@ -209,15 +260,26 @@ private:
 	unique_ptr<Val> DeleteFirstEntry(typename EntryMap::iterator iter) {
 		auto &entries = iter->second;
 		D_ASSERT(!entries.empty());
+		
+		std::cout << "[DELETE_FIRST] START: entries.size()=" << entries.size() << " cur_entries_num=" << cur_entries_num << std::endl;
 
 		auto value = std::move(entries.front().value);
-		lru_list.erase(entries.front().lru_iterator);
+		auto lru_iterator_to_erase = entries.front().lru_iterator;
+		
+		std::cout << "[DELETE_FIRST] About to erase from lru_list, list_size=" << lru_list.size() << std::endl;
+		lru_list.erase(lru_iterator_to_erase);
+		std::cout << "[DELETE_FIRST] Erased from lru_list, new_list_size=" << lru_list.size() << std::endl;
+		
 		if (entries.size() == 1) {
+			std::cout << "[DELETE_FIRST] Last entry for this key, removing from entry_map" << std::endl;
 			entry_map.erase(iter);
 		} else {
+			std::cout << "[DELETE_FIRST] Multiple entries for this key, removing front entry only" << std::endl;
 			entries.pop_front();
 		}
 		--cur_entries_num;
+		
+		std::cout << "[DELETE_FIRST] END: cur_entries_num=" << cur_entries_num << std::endl;
 		return value;
 	}
 

@@ -29,9 +29,14 @@ FileSystem *CacheFileSystemHandle::GetInternalFileSystem() const {
 }
 
 CacheFileSystemHandle::~CacheFileSystemHandle() {
+	std::cout << "[HANDLE_DTOR] START: Handle destructor called for " << GetPath() << std::endl;
 	if (dtor_callback) {
+		std::cout << "[HANDLE_DTOR] Calling destructor callback" << std::endl;
 		dtor_callback(*this);
+	} else {
+		std::cout << "[HANDLE_DTOR] No destructor callback" << std::endl;
 	}
+	std::cout << "[HANDLE_DTOR] END: Handle destructor completed" << std::endl;
 }
 
 void CacheFileSystemHandle::Close() {
@@ -179,19 +184,27 @@ unique_ptr<FileHandle> CacheFileSystem::CreateCacheFileHandleForRead(unique_ptr<
 	}
 
 	auto dtor_callback = [cache_key = std::move(cache_key), file_handle_cache = file_handle_cache, in_use_file_handle_counter = in_use_file_handle_counter](CacheFileSystemHandle& file_handle) {
+		std::cout << "[DTOR] START: Returning file handle to cache, key=" << cache_key.path << std::endl;
+		
 		// Reset file handle state (i.e. file offset) before placing into cache.
 		file_handle.internal_file_handle->Reset();
 		if (file_handle_cache == nullptr) {
+			std::cout << "[DTOR] Cache is null, not caching handle" << std::endl;
 			D_ASSERT(in_use_file_handle_counter == nullptr);
 			return;
 		}
 
 		// Place internal file handle back to file handle cache after reset.
+		std::cout << "[DTOR] About to call Put() for key=" << cache_key.path << std::endl;
 		auto evicted_handle = file_handle_cache->Put(std::move(cache_key), std::move(file_handle.internal_file_handle));
 		if (evicted_handle != nullptr) {
+			std::cout << "[DTOR] Put() evicted a handle, closing it" << std::endl;
 			evicted_handle->Close();
+		} else {
+			std::cout << "[DTOR] Put() did not evict any handle" << std::endl;
 		}
 		in_use_file_handle_counter->Decrement(cache_key);
+		std::cout << "[DTOR] END: Completed returning handle to cache" << std::endl;
 	};
 	return make_uniq<CacheFileSystemHandle>(std::move(internal_file_handle), *this, std::move(dtor_callback));
 }
@@ -296,6 +309,8 @@ void CacheFileSystem::InitializeGlobalConfig(optional_ptr<FileOpener> opener) {
 unique_ptr<FileHandle> CacheFileSystem::GetOrCreateFileHandleForRead(const string &path, FileOpenFlags flags,
                                                                      optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.OpenForReading());
+	
+	std::cout << "[GET_OR_CREATE] START: path=" << path << std::endl;
 
 	// Cache is exclusive, so we don't need to acquire lock for avoid repeated access.
 	if (file_handle_cache != nullptr) {
@@ -303,17 +318,20 @@ unique_ptr<FileHandle> CacheFileSystem::GetOrCreateFileHandleForRead(const strin
 		    .path = path,
 		    .flags = flags | FileOpenFlags::FILE_FLAGS_PARALLEL_ACCESS,
 		};
+		std::cout << "[GET_OR_CREATE] Checking cache for key=" << key.path << std::endl;
 		auto get_and_pop_res = file_handle_cache->GetAndPop(key);
 		for (auto &cur_val : get_and_pop_res.evicted_items) {
 			cur_val->Close();
 		}
 		if (get_and_pop_res.target_item != nullptr) {
+			std::cout << "[GET_OR_CREATE] CACHE HIT: Found cached handle for " << key.path << std::endl;
 			GetProfileCollector()->RecordCacheAccess(BaseProfileCollector::CacheEntity::kFileHandle,
 			                                         BaseProfileCollector::CacheAccess::kCacheHit);
 			return CreateCacheFileHandleForRead(std::move(get_and_pop_res.target_item));
 		}
 
 		// Record stats on cache miss.
+		std::cout << "[GET_OR_CREATE] CACHE MISS: No cached handle for " << key.path << std::endl;
 		GetProfileCollector()->RecordCacheAccess(BaseProfileCollector::CacheEntity::kFileHandle,
 		                                         BaseProfileCollector::CacheAccess::kCacheMiss);
 		
@@ -325,10 +343,12 @@ unique_ptr<FileHandle> CacheFileSystem::GetOrCreateFileHandleForRead(const strin
 		}
 	}
 
+	std::cout << "[GET_OR_CREATE] Opening new file handle for " << path << std::endl;
 	const auto oper_id = profile_collector->GenerateOperId();
 	profile_collector->RecordOperationStart(BaseProfileCollector::IoOperation::kOpen, oper_id);
 	auto file_handle = internal_filesystem->OpenFile(path, flags | FileOpenFlags::FILE_FLAGS_PARALLEL_ACCESS, opener);
 	profile_collector->RecordOperationEnd(BaseProfileCollector::IoOperation::kOpen, oper_id);
+	std::cout << "[GET_OR_CREATE] END: Created new cached handle for " << path << std::endl;
 	return CreateCacheFileHandleForRead(std::move(file_handle));
 }
 
