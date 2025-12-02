@@ -27,12 +27,11 @@ const auto TEST_FILENAME = StringUtil::Format("/tmp/%s", UUID::ToString(UUID::Ge
 } // namespace
 
 TEST_CASE("Test on in-memory cache filesystem", "[in-memory cache filesystem test]") {
-	g_cache_block_size = TEST_FILE_SIZE;
-	SCOPE_EXIT {
-		ResetGlobalStateAndConfig();
-	};
-
-	auto in_mem_cache_fs = make_uniq<CacheFileSystem>(LocalFileSystem::CreateLocal());
+	TestCacheConfig config;
+	config.cache_type = "in_mem";
+	config.cache_block_size = TEST_FILE_SIZE;
+	TestCacheFileSystemHelper helper(config);
+	auto *in_mem_cache_fs = helper.GetCacheFileSystem();
 
 	// First uncached read.
 	{
@@ -58,12 +57,11 @@ TEST_CASE("Test on in-memory cache filesystem", "[in-memory cache filesystem tes
 }
 
 TEST_CASE("Test on concurrent access", "[in-memory cache filesystem test]") {
-	g_cache_block_size = 5;
-	SCOPE_EXIT {
-		ResetGlobalStateAndConfig();
-	};
-
-	auto in_mem_cache_fs = make_uniq<CacheFileSystem>(LocalFileSystem::CreateLocal());
+	TestCacheConfig config;
+	config.cache_type = "in_mem";
+	config.cache_block_size = 5;
+	TestCacheFileSystemHelper helper(config);
+	auto *in_mem_cache_fs = helper.GetCacheFileSystem();
 
 	auto handle = in_mem_cache_fs->OpenFile(TEST_FILENAME,
 	                                        FileOpenFlags::FILE_FLAGS_READ | FileOpenFlags::FILE_FLAGS_PARALLEL_ACCESS);
@@ -89,9 +87,6 @@ TEST_CASE("Test on concurrent access", "[in-memory cache filesystem test]") {
 }
 
 int main(int argc, char **argv) {
-	// Set global cache type for testing.
-	*g_test_cache_type = *IN_MEM_CACHE_TYPE;
-
 	auto local_filesystem = LocalFileSystem::CreateLocal();
 	auto file_handle = local_filesystem->OpenFile(TEST_FILENAME, FileOpenFlags::FILE_FLAGS_WRITE |
 	                                                                 FileOpenFlags::FILE_FLAGS_FILE_CREATE_NEW);

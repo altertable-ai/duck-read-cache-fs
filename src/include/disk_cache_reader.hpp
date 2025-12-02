@@ -23,9 +23,23 @@ namespace duckdb {
 // Forward declaration.
 class DatabaseInstance;
 
+// Configuration for DiskCacheReader
+struct DiskCacheReaderConfig {
+	vector<string> cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY};
+	idx_t cache_block_size = DEFAULT_CACHE_BLOCK_SIZE;
+	string eviction_policy = *DEFAULT_ON_DISK_EVICTION_POLICY;
+	bool enable_mem_cache = DEFAULT_ENABLE_DISK_READER_MEM_CACHE;
+	idx_t mem_cache_block_count = DEFAULT_MAX_DISK_READER_MEM_CACHE_BLOCK_COUNT;
+	idx_t mem_cache_timeout_millisec = DEFAULT_DISK_READER_MEM_CACHE_TIMEOUT_MILLISEC;
+	idx_t min_disk_bytes_for_cache = DEFAULT_MIN_DISK_BYTES_FOR_CACHE;
+};
+
 class DiskCacheReader final : public BaseCacheReader {
 public:
-	explicit DiskCacheReader(optional_ptr<DatabaseInstance> duckdb_instance_p = nullptr);
+	// Constructor takes config to avoid reading from globals.
+	// This ensures thread safety when multiple instances exist.
+	explicit DiskCacheReader(const DiskCacheReaderConfig &config,
+	                         optional_ptr<DatabaseInstance> duckdb_instance_p = nullptr);
 	~DiskCacheReader() override = default;
 
 	std::string GetName() const override {
@@ -44,6 +58,9 @@ public:
 	// Notice returned filepath will be removed from LRU list, but the actual file won't be deleted.
 	string EvictCacheBlockLru();
 
+	// Check if caching is allowed (sufficient disk space)
+	bool CanCacheOnDisk(const string &cache_directory) const;
+
 private:
 	using InMemCache = ThreadSafeSharedLruCache<InMemCacheBlock, string, InMemCacheBlockHash, InMemCacheBlockEqual>;
 
@@ -54,6 +71,8 @@ private:
 
 	// Used to access local cache files.
 	unique_ptr<FileSystem> local_filesystem;
+	// Configuration (captured at construction to avoid race conditions).
+	DiskCacheReaderConfig config;
 	// Used for on-disk cache block LRU-based eviction.
 	std::mutex cache_file_creation_timestamp_map_mutex;
 	// Maps from last access timestamp to filepath.

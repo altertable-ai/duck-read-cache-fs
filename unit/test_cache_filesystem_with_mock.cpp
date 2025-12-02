@@ -6,6 +6,7 @@
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/string.hpp"
 #include "mock_filesystem.hpp"
+#include "test_utils.hpp"
 
 using namespace duckdb; // NOLINT
 
@@ -15,7 +16,7 @@ const std::string TEST_GLOB_NAME = "*"; // Need to contain glob characters.
 constexpr int64_t TEST_FILESIZE = 26;
 constexpr int64_t TEST_CHUNK_SIZE = 5;
 
-void TestReadWithMockFileSystem() {
+void TestReadWithMockFileSystem(const TestCacheConfig &base_config) {
 	uint64_t close_invocation = 0;
 	uint64_t dtor_invocation = 0;
 	auto close_callback = [&close_invocation]() {
@@ -28,7 +29,24 @@ void TestReadWithMockFileSystem() {
 	auto mock_filesystem = make_uniq<MockFileSystem>(std::move(close_callback), std::move(dtor_callback));
 	mock_filesystem->SetFileSize(TEST_FILESIZE);
 	auto *mock_filesystem_ptr = mock_filesystem.get();
-	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem));
+
+	// Create test helper which sets up the instance state
+	TestCacheConfig config = base_config;
+	config.cache_block_size = TEST_CHUNK_SIZE;
+	config.max_file_handle_cache_entry = 1;
+
+	// We need a DuckDB instance for this test
+	DuckDB db {};
+	auto instance_state = make_shared_ptr<CacheHttpfsInstanceState>();
+	auto &inst_config = instance_state->config;
+	inst_config.cache_type = config.cache_type;
+	inst_config.cache_block_size = config.cache_block_size;
+	inst_config.max_file_handle_cache_entry = config.max_file_handle_cache_entry;
+	inst_config.on_disk_cache_directories = config.cache_directories;
+	inst_config.enable_glob_cache = config.enable_glob_cache;
+	SetInstanceState(*db.instance, instance_state);
+
+	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem), db.instance.get());
 
 	// Uncached read.
 	{
@@ -132,6 +150,8 @@ TEST_CASE("Test file metadata cache for glob invocation", "[mock filesystem test
 
 	// Perform glob and get file size operation.
 	auto *mock_filesystem_ptr = mock_filesystem.get();
+
+	// Create cache filesystem without database instance (simpler test case)
 	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem));
 	cache_filesystem->Glob(FILE_PATTERN_WITH_GLOB);
 	auto file_handle = cache_filesystem->OpenFile(TEST_FILENAME, FileOpenFlags::FILE_FLAGS_READ);
@@ -177,28 +197,30 @@ TEST_CASE("Test file attribute for glob invocation", "[mock filesystem test]") {
 }
 
 TEST_CASE("Test disk cache reader with mock filesystem", "[mock filesystem test]") {
-	*g_test_cache_type = *ON_DISK_CACHE_TYPE;
-	g_cache_block_size = TEST_CHUNK_SIZE;
-	g_max_file_handle_cache_entry = 1;
-	for (const auto &cur_cache_dir : *g_on_disk_cache_directories) {
+	for (const auto &cur_cache_dir : {*DEFAULT_ON_DISK_CACHE_DIRECTORY}) {
 		LocalFileSystem::CreateLocal()->RemoveDirectory(cur_cache_dir);
 	}
-	TestReadWithMockFileSystem();
+
+	TestCacheConfig config;
+	config.cache_type = "on_disk";
+	config.cache_block_size = TEST_CHUNK_SIZE;
+	config.max_file_handle_cache_entry = 1;
+	TestReadWithMockFileSystem(config);
 }
 
 TEST_CASE("Test in-memory cache reader with mock filesystem", "[mock filesystem test]") {
-	*g_test_cache_type = *IN_MEM_CACHE_TYPE;
-	g_cache_block_size = TEST_CHUNK_SIZE;
-	g_max_file_handle_cache_entry = 1;
-	for (const auto &cur_cache_dir : *g_on_disk_cache_directories) {
+	for (const auto &cur_cache_dir : {*DEFAULT_ON_DISK_CACHE_DIRECTORY}) {
 		LocalFileSystem::CreateLocal()->RemoveDirectory(cur_cache_dir);
 	}
-	TestReadWithMockFileSystem();
+
+	TestCacheConfig config;
+	config.cache_type = "in_mem";
+	config.cache_block_size = TEST_CHUNK_SIZE;
+	config.max_file_handle_cache_entry = 1;
+	TestReadWithMockFileSystem(config);
 }
 
 TEST_CASE("Test clear cache", "[mock filesystem test]") {
-	g_max_file_handle_cache_entry = 1;
-
 	uint64_t close_invocation = 0;
 	uint64_t dtor_invocation = 0;
 	auto close_callback = [&close_invocation]() {
@@ -211,7 +233,18 @@ TEST_CASE("Test clear cache", "[mock filesystem test]") {
 	auto mock_filesystem = make_uniq<MockFileSystem>(std::move(close_callback), std::move(dtor_callback));
 	mock_filesystem->SetFileSize(TEST_FILESIZE);
 	auto *mock_filesystem_ptr = mock_filesystem.get();
-	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem));
+
+	// Create cache filesystem without database instance for this simpler test
+	TestCacheConfig config;
+	config.cache_type = "noop";
+	config.max_file_handle_cache_entry = 1;
+
+	DuckDB db {};
+	auto instance_state = make_shared_ptr<CacheHttpfsInstanceState>();
+	instance_state->config.max_file_handle_cache_entry = config.max_file_handle_cache_entry;
+	SetInstanceState(*db.instance, instance_state);
+
+	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem), db.instance.get());
 
 	auto perform_io_operation = [&]() {
 		auto handle = cache_filesystem->OpenFile(TEST_FILENAME, FileOpenFlags::FILE_FLAGS_READ);

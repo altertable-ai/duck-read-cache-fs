@@ -57,17 +57,16 @@ void BaseLineRead() {
 }
 
 void ReadUncachedWholeFile(uint64_t block_size) {
-	g_cache_block_size = block_size;
-	*g_cache_type = *DEFAULT_ON_DISK_CACHE_DIRECTORY;
-	SCOPE_EXIT {
-		ResetGlobalConfig();
-	};
+	// Note: This benchmark now uses default configuration.
+	// For custom block sizes, set cache_httpfs_cache_block_size via SQL SET command.
 
 	DuckDB db {};
 	StandardBufferManager buffer_manager {*db.instance, "/tmp/cache_httpfs_fs_benchmark"};
 	auto s3fs = make_uniq<S3FileSystem>(buffer_manager);
 
-	for (const auto &cur_cache_dir : *g_on_disk_cache_directories) {
+	// Use default cache directory
+	vector<string> cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY};
+	for (const auto &cur_cache_dir : cache_directories) {
 		LocalFileSystem::CreateLocal()->RemoveDirectory(cur_cache_dir);
 	}
 	auto disk_cache_fs = make_uniq<CacheFileSystem>(std::move(s3fs));
@@ -78,6 +77,8 @@ void ReadUncachedWholeFile(uint64_t block_size) {
 	SetConfig(set_vars, "AWS_ACCESS_KEY_ID", "s3_access_key_id");
 	SetConfig(set_vars, "AWS_SECRET_ACCESS_KEY", "s3_secret_access_key");
 	SetConfig(set_vars, "DUCKDB_S3_ENDPOINT", "s3_endpoint");
+	// Set the block size via configuration
+	set_vars["cache_httpfs_cache_block_size"] = Value::UBIGINT(block_size);
 	ClientContextFileOpener file_opener {*client_context};
 	client_context->transaction.BeginTransaction();
 

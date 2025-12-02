@@ -17,7 +17,13 @@ namespace duckdb {
 
 class InMemoryCacheReader final : public BaseCacheReader {
 public:
-	InMemoryCacheReader() = default;
+	// Constructor accepting cache configuration parameters
+	explicit InMemoryCacheReader(idx_t max_cache_block_count = DEFAULT_MAX_IN_MEM_CACHE_BLOCK_COUNT,
+	                             idx_t cache_block_timeout_millisec = DEFAULT_IN_MEM_BLOCK_CACHE_TIMEOUT_MILLISEC,
+	                             idx_t cache_block_size = DEFAULT_CACHE_BLOCK_SIZE)
+	    : max_cache_block_count(max_cache_block_count), cache_block_timeout_millisec(cache_block_timeout_millisec),
+	      cache_block_size(cache_block_size) {
+	}
 	~InMemoryCacheReader() override = default;
 
 	std::string GetName() const override {
@@ -32,6 +38,11 @@ public:
 
 private:
 	using InMemCache = ThreadSafeSharedLruCache<InMemCacheBlock, string, InMemCacheBlockHash, InMemCacheBlockEqual>;
+
+	// Cache configuration (captured at construction)
+	idx_t max_cache_block_count;
+	idx_t cache_block_timeout_millisec;
+	idx_t cache_block_size;
 
 	// Once flag to guard against cache's initialization.
 	std::once_flag cache_init_flag;

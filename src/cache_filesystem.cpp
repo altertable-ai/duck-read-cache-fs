@@ -17,6 +17,31 @@ namespace {
 constexpr const char *FILE_SIZE_INFO_KEY = "file_size";
 // For certain filesystems, file open info contains "last_modified" field in the extended stats map.
 constexpr const char *LAST_MOD_TIMESTAMP_KEY = "last_modified";
+
+// Helper to get cache reader manager from instance state
+InstanceCacheReaderManager *GetCacheReaderManager(optional_ptr<DatabaseInstance> instance) {
+	if (!instance) {
+		return nullptr;
+	}
+	auto *state = GetInstanceState(*instance);
+	if (!state) {
+		return nullptr;
+	}
+	return &state->cache_reader_manager;
+}
+
+// Helper to get instance config
+InstanceConfig *GetInstanceConfig(optional_ptr<DatabaseInstance> instance) {
+	if (!instance) {
+		return nullptr;
+	}
+	auto *state = GetInstanceState(*instance);
+	if (!state) {
+		return nullptr;
+	}
+	return &state->config;
+}
+
 } // namespace
 
 CacheFileSystemHandle::CacheFileSystemHandle(unique_ptr<FileHandle> internal_file_handle_p, CacheFileSystem &fs,
@@ -44,12 +69,18 @@ void CacheFileSystemHandle::Close() {
 }
 
 void CacheFileSystem::SetMetadataCache() {
-	if (!g_enable_metadata_cache) {
+	auto *config = GetInstanceConfig(duckdb_instance);
+	bool enable = config ? config->enable_metadata_cache : DEFAULT_ENABLE_METADATA_CACHE;
+	idx_t max_entry = config ? config->max_metadata_cache_entry : DEFAULT_MAX_METADATA_CACHE_ENTRY;
+	idx_t timeout =
+	    config ? config->metadata_cache_entry_timeout_millisec : DEFAULT_METADATA_CACHE_ENTRY_TIMEOUT_MILLISEC;
+
+	if (!enable) {
 		metadata_cache = nullptr;
 		return;
 	}
 	if (metadata_cache == nullptr) {
-		metadata_cache = make_uniq<MetadataCache>(g_max_metadata_cache_entry, g_metadata_cache_entry_timeout_millisec);
+		metadata_cache = make_uniq<MetadataCache>(max_entry, timeout);
 	}
 }
 
@@ -64,12 +95,17 @@ void CacheFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener
 }
 
 void CacheFileSystem::SetGlobCache() {
-	if (!g_enable_glob_cache) {
+	auto *config = GetInstanceConfig(duckdb_instance);
+	bool enable = config ? config->enable_glob_cache : DEFAULT_ENABLE_GLOB_CACHE;
+	idx_t max_entry = config ? config->max_glob_cache_entry : DEFAULT_MAX_GLOB_CACHE_ENTRY;
+	idx_t timeout = config ? config->glob_cache_entry_timeout_millisec : DEFAULT_GLOB_CACHE_ENTRY_TIMEOUT_MILLISEC;
+
+	if (!enable) {
 		glob_cache = nullptr;
 		return;
 	}
 	if (glob_cache == nullptr) {
-		glob_cache = make_uniq<GlobCache>(g_max_glob_cache_entry, g_glob_cache_entry_timeout_millisec);
+		glob_cache = make_uniq<GlobCache>(max_entry, timeout);
 	}
 }
 
@@ -97,13 +133,18 @@ void CacheFileSystem::ClearFileHandleCache(const std::string &filepath) {
 }
 
 void CacheFileSystem::SetFileHandleCache() {
-	if (!g_enable_file_handle_cache) {
+	auto *config = GetInstanceConfig(duckdb_instance);
+	bool enable = config ? config->enable_file_handle_cache : DEFAULT_ENABLE_FILE_HANDLE_CACHE;
+	idx_t max_entry = config ? config->max_file_handle_cache_entry : DEFAULT_MAX_FILE_HANDLE_CACHE_ENTRY;
+	idx_t timeout =
+	    config ? config->file_handle_cache_entry_timeout_millisec : DEFAULT_FILE_HANDLE_CACHE_ENTRY_TIMEOUT_MILLISEC;
+
+	if (!enable) {
 		ClearFileHandleCache();
 		return;
 	}
 	if (file_handle_cache == nullptr) {
-		file_handle_cache =
-		    make_shared_ptr<FileHandleCache>(g_max_file_handle_cache_entry, g_file_handle_cache_entry_timeout_millisec);
+		file_handle_cache = make_shared_ptr<FileHandleCache>(max_entry, timeout);
 	}
 	if (in_use_file_handle_counter == nullptr) {
 		in_use_file_handle_counter = make_shared_ptr<InUseFileHandleCounter>();
@@ -111,19 +152,25 @@ void CacheFileSystem::SetFileHandleCache() {
 }
 
 void CacheFileSystem::SetProfileCollector() {
-	if (*g_profile_type == *NOOP_PROFILE_TYPE) {
+	auto *config = GetInstanceConfig(duckdb_instance);
+	string profile_type = config ? config->profile_type : *DEFAULT_PROFILE_TYPE;
+
+	if (profile_type == *NOOP_PROFILE_TYPE) {
 		if (profile_collector == nullptr || profile_collector->GetProfilerType() != *NOOP_PROFILE_TYPE) {
 			profile_collector = make_uniq<NoopProfileCollector>();
 		}
 		return;
 	}
-	if (*g_profile_type == *TEMP_PROFILE_TYPE) {
+	if (profile_type == *TEMP_PROFILE_TYPE) {
 		if (profile_collector == nullptr || profile_collector->GetProfilerType() != *TEMP_PROFILE_TYPE) {
 			profile_collector = make_uniq<TempProfileCollector>();
 		}
 		return;
 	}
-	D_ASSERT(false); // Unreachable;
+	// Default to noop if unknown type
+	if (profile_collector == nullptr) {
+		profile_collector = make_uniq<NoopProfileCollector>();
+	}
 }
 
 void CacheFileSystem::ClearCache() {
@@ -134,7 +181,10 @@ void CacheFileSystem::ClearCache() {
 		glob_cache->Clear();
 	}
 	ClearFileHandleCache();
-	cache_reader_manager.ClearCache();
+	auto *mgr = GetCacheReaderManager(duckdb_instance);
+	if (mgr) {
+		mgr->ClearCache();
+	}
 }
 
 void CacheFileSystem::ClearCache(const std::string &filepath) {
@@ -145,7 +195,10 @@ void CacheFileSystem::ClearCache(const std::string &filepath) {
 		glob_cache->Clear([&filepath](const std::string &key) { return key == filepath; });
 	}
 	ClearFileHandleCache(filepath);
-	cache_reader_manager.ClearCache(filepath);
+	auto *mgr = GetCacheReaderManager(duckdb_instance);
+	if (mgr) {
+		mgr->ClearCache(filepath);
+	}
 }
 
 bool CacheFileSystem::CanHandleFile(const string &fpath) {
@@ -304,14 +357,32 @@ void CacheFileSystem::InitializeGlobalConfig(optional_ptr<FileOpener> opener) {
 	// For duckdb, read operation happens after successful file open, at which point we won't have new configs and read
 	// operation happening concurrently.
 	std::lock_guard<std::mutex> cache_reader_lck(cache_reader_mutex);
-	SetGlobalConfig(opener);
+
+	// Update instance config from opener
+	auto *config = GetInstanceConfig(duckdb_instance);
+	if (config) {
+		config->UpdateFromOpener(opener);
+	}
+
 	SetProfileCollector();
-	cache_reader_manager.SetCacheReader(duckdb_instance);
+
+	// Initialize cache reader via instance manager
+	auto *mgr = GetCacheReaderManager(duckdb_instance);
+	if (mgr && config) {
+		mgr->SetCacheReader(*config, duckdb_instance);
+	}
+
 	SetMetadataCache();
 	SetFileHandleCache();
 	SetGlobCache();
+
 	D_ASSERT(profile_collector != nullptr);
-	cache_reader_manager.GetCacheReader()->SetProfileCollector(profile_collector.get());
+	if (mgr) {
+		auto *reader = mgr->GetCacheReader();
+		if (reader) {
+			reader->SetProfileCollector(profile_collector.get());
+		}
+	}
 }
 
 unique_ptr<FileHandle> CacheFileSystem::GetOrCreateFileHandleForRead(const string &path, FileOpenFlags flags,
@@ -433,8 +504,21 @@ int64_t CacheFileSystem::ReadImpl(FileHandle &handle, void *buffer, int64_t nr_b
 	}
 
 	// Leverage cache read manager.
-	cache_reader_manager.GetCacheReader()->ReadAndCache(handle, static_cast<char *>(buffer), location, bytes_to_read,
-	                                                    file_size);
+	auto *mgr = GetCacheReaderManager(duckdb_instance);
+	if (mgr) {
+		auto *reader = mgr->GetCacheReader();
+		if (reader) {
+			reader->ReadAndCache(handle, static_cast<char *>(buffer), location, bytes_to_read, file_size);
+		} else {
+			// Fallback to direct read if no cache reader
+			auto &cache_handle = handle.Cast<CacheFileSystemHandle>();
+			internal_filesystem->Read(*cache_handle.internal_file_handle, buffer, nr_bytes, location);
+		}
+	} else {
+		// Fallback to direct read if no manager
+		auto &cache_handle = handle.Cast<CacheFileSystemHandle>();
+		internal_filesystem->Read(*cache_handle.internal_file_handle, buffer, nr_bytes, location);
+	}
 
 	return bytes_to_read;
 }

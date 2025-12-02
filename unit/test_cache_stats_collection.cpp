@@ -1,4 +1,4 @@
-// This test file validate cache hit, cache miss and cache in-use count.
+// This test file validates cache hit, cache miss and cache in-use count.
 
 #define CATCH_CONFIG_RUNNER
 #include "catch.hpp"
@@ -41,13 +41,14 @@ CacheAccessInfo GetFileHandleCacheInfo(BaseProfileCollector *profiler) {
 } // namespace
 
 TEST_CASE("Test cache stats collection disabled", "[profile collector]") {
-	*g_profile_type = *NOOP_PROFILE_TYPE;
-	SCOPE_EXIT {
-		ResetGlobalStateAndConfig();
-	};
+	TestCacheConfig config;
+	config.cache_type = "noop";
+	config.profile_type = "noop";
+	config.enable_file_handle_cache = true;
+	TestCacheFileSystemHelper helper(config);
+	auto *cache_filesystem = helper.GetCacheFileSystem();
 
 	// First access, there're no cache entries inside of cache filesystem.
-	auto cache_filesystem = make_uniq<CacheFileSystem>(make_uniq<LocalFileSystem>());
 	[[maybe_unused]] auto file_handle_1 = cache_filesystem->OpenFile(TEST_FILEPATH, FileOpenFlags::FILE_FLAGS_READ);
 	auto *profiler = cache_filesystem->GetProfileCollector();
 	auto file_handle_cache_info = GetFileHandleCacheInfo(profiler);
@@ -65,13 +66,14 @@ TEST_CASE("Test cache stats collection disabled", "[profile collector]") {
 }
 
 TEST_CASE("Test cache stats collection", "[profile collector]") {
-	*g_profile_type = *TEMP_PROFILE_TYPE;
-	SCOPE_EXIT {
-		ResetGlobalStateAndConfig();
-	};
+	TestCacheConfig config;
+	config.cache_type = "noop";
+	config.profile_type = "temp";
+	config.enable_file_handle_cache = true;
+	TestCacheFileSystemHelper helper(config);
+	auto *cache_filesystem = helper.GetCacheFileSystem();
 
 	// First access, there're no cache entries inside of cache filesystem.
-	auto cache_filesystem = make_uniq<CacheFileSystem>(make_uniq<LocalFileSystem>());
 	[[maybe_unused]] auto file_handle_1 = cache_filesystem->OpenFile(TEST_FILEPATH, FileOpenFlags::FILE_FLAGS_READ);
 	auto *profiler = cache_filesystem->GetProfileCollector();
 	auto file_handle_cache_info = GetFileHandleCacheInfo(profiler);
