@@ -6,6 +6,7 @@
 #include <mutex>
 
 #include "base_cache_reader.hpp"
+#include "cache_filesystem_config.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
@@ -22,7 +23,7 @@ class DatabaseInstance;
 class FileOpener;
 
 //===--------------------------------------------------------------------===//
-// Per-instance filesystem registry (replaces global CacheFsRefRegistry)
+// Per-instance filesystem registry
 //===--------------------------------------------------------------------===//
 class InstanceCacheFsRegistry {
 public:
@@ -37,7 +38,7 @@ private:
 };
 
 //===--------------------------------------------------------------------===//
-// Per-instance cache reader manager (replaces global CacheReaderManager)
+// Per-instance cache reader manager
 //===--------------------------------------------------------------------===//
 
 // Forward declaration
@@ -62,51 +63,48 @@ private:
 };
 
 //===--------------------------------------------------------------------===//
-// Per-instance configuration (replaces global g_* variables)
+// Per-instance configuration
 //===--------------------------------------------------------------------===//
 struct InstanceConfig {
 	// General config
-	idx_t cache_block_size;
-	string cache_type;
-	string profile_type;
-	uint64_t max_subrequest_count;
-	bool ignore_sigpipe;
+	idx_t cache_block_size = DEFAULT_CACHE_BLOCK_SIZE;
+	string cache_type = *DEFAULT_CACHE_TYPE;
+	string profile_type = *DEFAULT_PROFILE_TYPE;
+	uint64_t max_subrequest_count = DEFAULT_MAX_SUBREQUEST_COUNT;
+	bool ignore_sigpipe = DEFAULT_IGNORE_SIGPIPE;
 
 	// On-disk cache config
-	vector<string> on_disk_cache_directories;
-	idx_t min_disk_bytes_for_cache;
-	string on_disk_eviction_policy;
+	vector<string> on_disk_cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY};
+	idx_t min_disk_bytes_for_cache = DEFAULT_MIN_DISK_BYTES_FOR_CACHE;
+	string on_disk_eviction_policy = *DEFAULT_ON_DISK_EVICTION_POLICY;
 
 	// Disk reader in-memory cache config
-	bool enable_disk_reader_mem_cache;
-	idx_t disk_reader_max_mem_cache_block_count;
-	idx_t disk_reader_max_mem_cache_timeout_millisec;
+	bool enable_disk_reader_mem_cache = DEFAULT_ENABLE_DISK_READER_MEM_CACHE;
+	idx_t disk_reader_max_mem_cache_block_count = DEFAULT_MAX_DISK_READER_MEM_CACHE_BLOCK_COUNT;
+	idx_t disk_reader_max_mem_cache_timeout_millisec = DEFAULT_DISK_READER_MEM_CACHE_TIMEOUT_MILLISEC;
 
 	// In-memory cache config
-	idx_t max_in_mem_cache_block_count;
-	idx_t in_mem_cache_block_timeout_millisec;
+	idx_t max_in_mem_cache_block_count = DEFAULT_MAX_IN_MEM_CACHE_BLOCK_COUNT;
+	idx_t in_mem_cache_block_timeout_millisec = DEFAULT_IN_MEM_BLOCK_CACHE_TIMEOUT_MILLISEC;
 
 	// Metadata cache config
-	bool enable_metadata_cache;
-	idx_t max_metadata_cache_entry;
-	idx_t metadata_cache_entry_timeout_millisec;
+	bool enable_metadata_cache = DEFAULT_ENABLE_METADATA_CACHE;
+	idx_t max_metadata_cache_entry = DEFAULT_MAX_METADATA_CACHE_ENTRY;
+	idx_t metadata_cache_entry_timeout_millisec = DEFAULT_METADATA_CACHE_ENTRY_TIMEOUT_MILLISEC;
 
 	// File handle cache config
-	bool enable_file_handle_cache;
-	idx_t max_file_handle_cache_entry;
-	idx_t file_handle_cache_entry_timeout_millisec;
+	bool enable_file_handle_cache = DEFAULT_ENABLE_FILE_HANDLE_CACHE;
+	idx_t max_file_handle_cache_entry = DEFAULT_MAX_FILE_HANDLE_CACHE_ENTRY;
+	idx_t file_handle_cache_entry_timeout_millisec = DEFAULT_FILE_HANDLE_CACHE_ENTRY_TIMEOUT_MILLISEC;
 
 	// Glob cache config
-	bool enable_glob_cache;
-	idx_t max_glob_cache_entry;
-	idx_t glob_cache_entry_timeout_millisec;
+	bool enable_glob_cache = DEFAULT_ENABLE_GLOB_CACHE;
+	idx_t max_glob_cache_entry = DEFAULT_MAX_GLOB_CACHE_ENTRY;
+	idx_t glob_cache_entry_timeout_millisec = DEFAULT_GLOB_CACHE_ENTRY_TIMEOUT_MILLISEC;
 
 	// Testing config
-	string test_cache_type;
-	bool test_insufficient_disk_space;
-
-	// Initialize with defaults
-	void SetDefaults();
+	string test_cache_type = "";
+	bool test_insufficient_disk_space = false;
 
 	// Update from FileOpener settings
 	void UpdateFromOpener(optional_ptr<FileOpener> opener);
@@ -124,10 +122,7 @@ struct CacheHttpfsInstanceState : public ObjectCacheEntry {
 	InstanceCacheReaderManager cache_reader_manager;
 	InstanceConfig config;
 
-	// Initialize with defaults
-	CacheHttpfsInstanceState() {
-		config.SetDefaults();
-	}
+	CacheHttpfsInstanceState() = default;
 
 	// ObjectCacheEntry interface
 	string GetObjectType() override {

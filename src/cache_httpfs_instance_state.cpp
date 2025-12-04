@@ -133,40 +133,6 @@ void InstanceCacheReaderManager::Reset() {
 // InstanceConfig implementation
 //===--------------------------------------------------------------------===//
 
-void InstanceConfig::SetDefaults() {
-	cache_block_size = DEFAULT_CACHE_BLOCK_SIZE;
-	cache_type = *DEFAULT_CACHE_TYPE;
-	profile_type = *DEFAULT_PROFILE_TYPE;
-	max_subrequest_count = DEFAULT_MAX_SUBREQUEST_COUNT;
-	ignore_sigpipe = DEFAULT_IGNORE_SIGPIPE;
-
-	on_disk_cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY};
-	min_disk_bytes_for_cache = DEFAULT_MIN_DISK_BYTES_FOR_CACHE;
-	on_disk_eviction_policy = *DEFAULT_ON_DISK_EVICTION_POLICY;
-
-	enable_disk_reader_mem_cache = DEFAULT_ENABLE_DISK_READER_MEM_CACHE;
-	disk_reader_max_mem_cache_block_count = DEFAULT_MAX_DISK_READER_MEM_CACHE_BLOCK_COUNT;
-	disk_reader_max_mem_cache_timeout_millisec = DEFAULT_DISK_READER_MEM_CACHE_TIMEOUT_MILLISEC;
-
-	max_in_mem_cache_block_count = DEFAULT_MAX_IN_MEM_CACHE_BLOCK_COUNT;
-	in_mem_cache_block_timeout_millisec = DEFAULT_IN_MEM_BLOCK_CACHE_TIMEOUT_MILLISEC;
-
-	enable_metadata_cache = DEFAULT_ENABLE_METADATA_CACHE;
-	max_metadata_cache_entry = DEFAULT_MAX_METADATA_CACHE_ENTRY;
-	metadata_cache_entry_timeout_millisec = DEFAULT_METADATA_CACHE_ENTRY_TIMEOUT_MILLISEC;
-
-	enable_file_handle_cache = DEFAULT_ENABLE_FILE_HANDLE_CACHE;
-	max_file_handle_cache_entry = DEFAULT_MAX_FILE_HANDLE_CACHE_ENTRY;
-	file_handle_cache_entry_timeout_millisec = DEFAULT_FILE_HANDLE_CACHE_ENTRY_TIMEOUT_MILLISEC;
-
-	enable_glob_cache = DEFAULT_ENABLE_GLOB_CACHE;
-	max_glob_cache_entry = DEFAULT_MAX_GLOB_CACHE_ENTRY;
-	glob_cache_entry_timeout_millisec = DEFAULT_GLOB_CACHE_ENTRY_TIMEOUT_MILLISEC;
-
-	test_cache_type = "";
-	test_insufficient_disk_space = false;
-}
-
 void InstanceConfig::UpdateFromOpener(optional_ptr<FileOpener> opener) {
 	if (opener == nullptr) {
 		// Apply test_cache_type override if set

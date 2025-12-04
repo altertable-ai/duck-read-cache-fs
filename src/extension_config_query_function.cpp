@@ -149,7 +149,6 @@ InstanceConfig GetConfigFromContext(ClientContext &context) {
 	}
 	// Return default config if instance state not found
 	InstanceConfig default_config;
-	default_config.SetDefaults();
 	return default_config;
 }
 
