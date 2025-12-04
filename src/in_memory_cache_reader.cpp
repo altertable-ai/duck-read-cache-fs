@@ -42,7 +42,6 @@ InMemoryCacheReaderConfig GetConfig(optional_ptr<DatabaseInstance> duckdb_instan
 
 void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t requested_start_offset,
                                        idx_t requested_bytes_to_read, idx_t file_size) {
-	// Get config once at the start to avoid repeated mutex locks
 	const auto config = GetConfig(duckdb_instance);
 
 	std::call_once(cache_init_flag, [this, &config]() {
