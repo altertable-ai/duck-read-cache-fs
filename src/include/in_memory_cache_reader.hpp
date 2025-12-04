@@ -3,26 +3,21 @@
 #pragma once
 
 #include "base_cache_reader.hpp"
-#include "cache_filesystem.hpp"
-#include "cache_filesystem_config.hpp"
-#include "copiable_value_lru_cache.hpp"
-#include "duckdb/common/file_opener.hpp"
-#include "duckdb/common/file_system.hpp"
-#include "duckdb/common/local_file_system.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "in_mem_cache_block.hpp"
 #include "shared_lru_cache.hpp"
 
 namespace duckdb {
 
+// Forward declaration.
+class DatabaseInstance;
+
 class InMemoryCacheReader final : public BaseCacheReader {
 public:
-	// Constructor accepting cache configuration parameters
-	explicit InMemoryCacheReader(idx_t max_cache_block_count = DEFAULT_MAX_IN_MEM_CACHE_BLOCK_COUNT,
-	                             idx_t cache_block_timeout_millisec = DEFAULT_IN_MEM_BLOCK_CACHE_TIMEOUT_MILLISEC,
-	                             idx_t cache_block_size = DEFAULT_CACHE_BLOCK_SIZE)
-	    : max_cache_block_count(max_cache_block_count), cache_block_timeout_millisec(cache_block_timeout_millisec),
-	      cache_block_size(cache_block_size) {
+	// Constructor: config values are read from instance state at runtime (with defaults as fallback).
+	explicit InMemoryCacheReader(optional_ptr<DatabaseInstance> duckdb_instance_p = nullptr)
+	    : duckdb_instance(duckdb_instance_p) {
 	}
 	~InMemoryCacheReader() override = default;
 
@@ -39,10 +34,8 @@ public:
 private:
 	using InMemCache = ThreadSafeSharedLruCache<InMemCacheBlock, string, InMemCacheBlockHash, InMemCacheBlockEqual>;
 
-	// Cache configuration (captured at construction)
-	idx_t max_cache_block_count;
-	idx_t cache_block_timeout_millisec;
-	idx_t cache_block_size;
+	// Duckdb instance for config lookup.
+	optional_ptr<DatabaseInstance> duckdb_instance;
 
 	// Once flag to guard against cache's initialization.
 	std::once_flag cache_init_flag;

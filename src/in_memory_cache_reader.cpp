@@ -1,13 +1,10 @@
 #include "in_memory_cache_reader.hpp"
 
+#include "cache_filesystem.hpp"
 #include "cache_filesystem_logger.hpp"
+#include "cache_httpfs_instance_state.hpp"
 #include "cache_read_chunk.hpp"
-#include "crypto.hpp"
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/common/thread.hpp"
-#include "duckdb/common/types/uuid.hpp"
 #include "utils/include/resize_uninitialized.hpp"
-#include "utils/include/filesystem_utils.hpp"
 #include "utils/include/thread_pool.hpp"
 #include "utils/include/thread_utils.hpp"
 
@@ -16,13 +13,43 @@
 
 namespace duckdb {
 
+namespace {
+
+// Runtime config for InMemoryCacheReader (fetched from instance state or defaults)
+struct InMemoryCacheReaderConfig {
+	idx_t max_cache_block_count = DEFAULT_MAX_IN_MEM_CACHE_BLOCK_COUNT;
+	idx_t cache_block_timeout_millisec = DEFAULT_IN_MEM_BLOCK_CACHE_TIMEOUT_MILLISEC;
+	idx_t cache_block_size = DEFAULT_CACHE_BLOCK_SIZE;
+	uint64_t max_subrequest_count = DEFAULT_MAX_SUBREQUEST_COUNT;
+};
+
+// Get runtime config from instance state (returns copy with defaults if unavailable)
+InMemoryCacheReaderConfig GetConfig(optional_ptr<DatabaseInstance> duckdb_instance) {
+	InMemoryCacheReaderConfig config;
+	if (duckdb_instance) {
+		auto *state = GetInstanceState(*duckdb_instance);
+		if (state) {
+			config.max_cache_block_count = state->config.max_in_mem_cache_block_count;
+			config.cache_block_timeout_millisec = state->config.in_mem_cache_block_timeout_millisec;
+			config.cache_block_size = state->config.cache_block_size;
+			config.max_subrequest_count = state->config.max_subrequest_count;
+		}
+	}
+	return config;
+}
+
+} // namespace
+
 void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t requested_start_offset,
                                        idx_t requested_bytes_to_read, idx_t file_size) {
-	std::call_once(cache_init_flag, [this]() {
-		cache = make_uniq<InMemCache>(max_cache_block_count, cache_block_timeout_millisec);
+	// Get config once at the start to avoid repeated mutex locks
+	const auto config = GetConfig(duckdb_instance);
+
+	std::call_once(cache_init_flag, [this, &config]() {
+		cache = make_uniq<InMemCache>(config.max_cache_block_count, config.cache_block_timeout_millisec);
 	});
 
-	const idx_t block_size = cache_block_size;
+	const idx_t block_size = config.cache_block_size;
 	const idx_t aligned_start_offset = requested_start_offset / block_size * block_size;
 	const idx_t aligned_last_chunk_offset =
 	    (requested_start_offset + requested_bytes_to_read) / block_size * block_size;
@@ -33,7 +60,7 @@ void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t r
 	// Used to calculate bytes to copy for last chunk.
 	idx_t already_read_bytes = 0;
 	// Threads to parallelly perform IO.
-	ThreadPool io_threads(GetThreadCountForSubrequests(subrequest_count));
+	ThreadPool io_threads(GetThreadCountForSubrequests(subrequest_count, config.max_subrequest_count));
 
 	// To improve IO performance, we split requested bytes (after alignment) into
 	// multiple chunks and fetch them in parallel.

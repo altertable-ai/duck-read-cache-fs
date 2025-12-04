@@ -1,8 +1,8 @@
 #define CATCH_CONFIG_RUNNER
 #include "catch.hpp"
 
-#include "disk_cache_reader.hpp"
-#include "duckdb/common/string.hpp"
+#include "cache_filesystem.hpp"
+#include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/virtual_file_system.hpp"
 #include "hffs.hpp"
 

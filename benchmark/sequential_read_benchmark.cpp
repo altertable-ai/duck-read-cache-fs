@@ -2,16 +2,14 @@
 // - Request number of bytes larger than cache block size;
 // - Sequentially read forward until the end of remote file.
 
-#include "disk_cache_reader.hpp"
+#include "cache_filesystem.hpp"
 #include "duckdb/storage/standard_buffer_manager.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/database.hpp"
 #include "s3fs.hpp"
-#include "scope_guard.hpp"
 #include "time_utils.hpp"
 
 #include <csignal>
-#include <array>
 #include <iostream>
 
 namespace duckdb {

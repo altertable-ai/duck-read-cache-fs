@@ -56,15 +56,7 @@ void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config, op
 
 	if (config.cache_type == *ON_DISK_CACHE_TYPE) {
 		if (on_disk_cache_reader == nullptr) {
-			DiskCacheReaderConfig disk_config;
-			disk_config.cache_directories = config.on_disk_cache_directories;
-			disk_config.cache_block_size = config.cache_block_size;
-			disk_config.eviction_policy = config.on_disk_eviction_policy;
-			disk_config.enable_mem_cache = config.enable_disk_reader_mem_cache;
-			disk_config.mem_cache_block_count = config.disk_reader_max_mem_cache_block_count;
-			disk_config.mem_cache_timeout_millisec = config.disk_reader_max_mem_cache_timeout_millisec;
-			disk_config.min_disk_bytes_for_cache = config.min_disk_bytes_for_cache;
-			on_disk_cache_reader = make_uniq<DiskCacheReader>(disk_config, instance);
+			on_disk_cache_reader = make_uniq<DiskCacheReader>(config.on_disk_cache_directories, instance);
 		}
 		internal_cache_reader = on_disk_cache_reader.get();
 		return;
@@ -72,9 +64,7 @@ void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config, op
 
 	if (config.cache_type == *IN_MEM_CACHE_TYPE) {
 		if (in_mem_cache_reader == nullptr) {
-			in_mem_cache_reader =
-			    make_uniq<InMemoryCacheReader>(config.max_in_mem_cache_block_count,
-			                                   config.in_mem_cache_block_timeout_millisec, config.cache_block_size);
+			in_mem_cache_reader = make_uniq<InMemoryCacheReader>(instance);
 		}
 		internal_cache_reader = in_mem_cache_reader.get();
 		return;
@@ -101,9 +91,7 @@ vector<BaseCacheReader *> InstanceCacheReaderManager::GetCacheReaders() const {
 void InstanceCacheReaderManager::InitializeDiskCacheReader(const vector<string> &cache_directories) {
 	std::lock_guard<std::mutex> lock(mutex);
 	if (on_disk_cache_reader == nullptr) {
-		DiskCacheReaderConfig disk_config;
-		disk_config.cache_directories = cache_directories;
-		on_disk_cache_reader = make_uniq<DiskCacheReader>(disk_config, nullptr);
+		on_disk_cache_reader = make_uniq<DiskCacheReader>(cache_directories, nullptr);
 	}
 }
 

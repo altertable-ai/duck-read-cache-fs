@@ -5,16 +5,13 @@
 #include <mutex>
 
 #include "base_cache_reader.hpp"
+#include "cache_filesystem_config.hpp"
 #include "duckdb/common/file_system.hpp"
-#include "duckdb/common/helper.hpp"
-#include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/unique_ptr.hpp"
-#include "cache_filesystem.hpp"
-#include "cache_filesystem_config.hpp"
 #include "in_mem_cache_block.hpp"
 #include "shared_lru_cache.hpp"
 
@@ -23,22 +20,10 @@ namespace duckdb {
 // Forward declaration.
 class DatabaseInstance;
 
-// Configuration for DiskCacheReader
-struct DiskCacheReaderConfig {
-	vector<string> cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY};
-	idx_t cache_block_size = DEFAULT_CACHE_BLOCK_SIZE;
-	string eviction_policy = *DEFAULT_ON_DISK_EVICTION_POLICY;
-	bool enable_mem_cache = DEFAULT_ENABLE_DISK_READER_MEM_CACHE;
-	idx_t mem_cache_block_count = DEFAULT_MAX_DISK_READER_MEM_CACHE_BLOCK_COUNT;
-	idx_t mem_cache_timeout_millisec = DEFAULT_DISK_READER_MEM_CACHE_TIMEOUT_MILLISEC;
-	idx_t min_disk_bytes_for_cache = DEFAULT_MIN_DISK_BYTES_FOR_CACHE;
-};
-
 class DiskCacheReader final : public BaseCacheReader {
 public:
-	// Constructor takes config to avoid reading from globals.
-	// This ensures thread safety when multiple instances exist.
-	explicit DiskCacheReader(const DiskCacheReaderConfig &config,
+	// Constructor: cache_directories defines where cache files are stored.
+	explicit DiskCacheReader(vector<string> cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY},
 	                         optional_ptr<DatabaseInstance> duckdb_instance_p = nullptr);
 	~DiskCacheReader() override = default;
 
@@ -71,8 +56,8 @@ private:
 
 	// Used to access local cache files.
 	unique_ptr<FileSystem> local_filesystem;
-	// Configuration (captured at construction to avoid race conditions).
-	DiskCacheReaderConfig config;
+	// Cache directories (where cache files are stored).
+	vector<string> cache_directories;
 	// Used for on-disk cache block LRU-based eviction.
 	std::mutex cache_file_creation_timestamp_map_mutex;
 	// Maps from last access timestamp to filepath.
@@ -83,7 +68,7 @@ private:
 	// Used to avoid local disk IO.
 	// NOTICE: cache key uses remote filepath, instead of local cache filepath.
 	unique_ptr<InMemCache> in_mem_cache_blocks;
-	// Duckdb instance, used for logging purpose.
+	// Duckdb instance for config lookup and logging.
 	optional_ptr<DatabaseInstance> duckdb_instance;
 };
 

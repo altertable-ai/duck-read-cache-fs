@@ -1,16 +1,14 @@
 // Benchmark setup: start from a random offset, and read 10 bytes every time (which is much less than block size).
 
-#include "disk_cache_reader.hpp"
+#include "cache_filesystem.hpp"
 #include "duckdb/storage/standard_buffer_manager.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/database.hpp"
 #include "rand_utils.hpp"
 #include "s3fs.hpp"
-#include "scope_guard.hpp"
 #include "time_utils.hpp"
 
 #include <csignal>
-#include <array>
 #include <iostream>
 
 namespace {

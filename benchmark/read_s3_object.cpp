@@ -1,12 +1,12 @@
 // This file serves as a benchmark to read a whole S3 objects; it only tests
 // uncached read.
 
-#include "disk_cache_reader.hpp"
+#include "cache_filesystem.hpp"
+#include "duckdb/common/local_file_system.hpp"
 #include "duckdb/storage/standard_buffer_manager.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/database.hpp"
 #include "s3fs.hpp"
-#include "scope_guard.hpp"
 
 #include <array>
 #include <csignal>
@@ -57,9 +57,6 @@ void BaseLineRead() {
 }
 
 void ReadUncachedWholeFile(uint64_t block_size) {
-	// Note: This benchmark now uses default configuration.
-	// For custom block sizes, set cache_httpfs_cache_block_size via SQL SET command.
-
 	DuckDB db {};
 	StandardBufferManager buffer_manager {*db.instance, "/tmp/cache_httpfs_fs_benchmark"};
 	auto s3fs = make_uniq<S3FileSystem>(buffer_manager);
