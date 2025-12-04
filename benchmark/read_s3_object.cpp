@@ -66,7 +66,9 @@ void ReadUncachedWholeFile(uint64_t block_size) {
 	for (const auto &cur_cache_dir : cache_directories) {
 		LocalFileSystem::CreateLocal()->RemoveDirectory(cur_cache_dir);
 	}
-	auto disk_cache_fs = make_uniq<CacheFileSystem>(std::move(s3fs));
+
+	auto instance_state = make_shared_ptr<CacheHttpfsInstanceState>();
+	auto disk_cache_fs = make_uniq<CacheFileSystem>(std::move(s3fs), std::move(instance_state));
 
 	auto client_context = make_shared_ptr<ClientContext>(db.instance);
 	auto &set_vars = client_context->config.set_variables;

@@ -90,7 +90,7 @@ TEST_CASE("Test on changing extension config change default cache dir path setti
 	SetInstanceState(*instance, instance_state);
 
 	auto &fs = instance->GetFileSystem();
-	fs.RegisterSubSystem(make_uniq<CacheFileSystem>(LocalFileSystem::CreateLocal(), instance.get()));
+	fs.RegisterSubSystem(make_uniq<CacheFileSystem>(LocalFileSystem::CreateLocal(), std::move(instance_state)));
 
 	Connection con(db);
 	con.Query(StringUtil::Format("SET cache_httpfs_cache_directory ='%s'", TEST_ON_DISK_CACHE_DIRECTORY));

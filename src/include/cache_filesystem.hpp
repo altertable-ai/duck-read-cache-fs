@@ -69,23 +69,17 @@ public:
 class CacheFileSystem : public FileSystem {
 public:
 	explicit CacheFileSystem(unique_ptr<FileSystem> internal_filesystem_p,
-	                         optional_ptr<DatabaseInstance> duckdb_instance_p = nullptr)
-	    : internal_filesystem(std::move(internal_filesystem_p)), duckdb_instance(duckdb_instance_p) {
+	                         shared_ptr<CacheHttpfsInstanceState> instance_state_p)
+	    : internal_filesystem(std::move(internal_filesystem_p)), instance_state(std::move(instance_state_p)) {
 		// Register with per-instance registry
-		if (duckdb_instance) {
-			auto *state = GetInstanceState(*duckdb_instance);
-			if (state) {
-				state->registry.Register(this);
-			}
+		if (instance_state) {
+			instance_state->registry.Register(this);
 		}
 	}
 	~CacheFileSystem() override {
 		// Unregister from per-instance registry before destruction
-		if (duckdb_instance) {
-			auto *state = GetInstanceState(*duckdb_instance);
-			if (state) {
-				state->registry.Unregister(this);
-			}
+		if (instance_state) {
+			instance_state->registry.Unregister(this);
 		}
 		ClearFileHandleCache();
 	}
@@ -124,7 +118,7 @@ public:
 	// For other API calls, delegate to [internal_filesystem] to handle.
 	unique_ptr<FileHandle> OpenCompressedFile(QueryContext context, unique_ptr<FileHandle> handle,
 	                                          bool write) override {
-		auto file_handle = internal_filesystem->OpenCompressedFile(std::move(context), std::move(handle), write);
+		auto file_handle = internal_filesystem->OpenCompressedFile(context, std::move(handle), write);
 		return make_uniq<CacheFileSystemHandle>(std::move(file_handle), *this,
 		                                        /*dtor_callback=*/[](CacheFileSystemHandle & /*unused*/) {});
 	}
@@ -335,8 +329,8 @@ private:
 	// Glob cache, which maps from path to filenames.
 	using GlobCache = ThreadSafeSharedLruConstCache<string, vector<OpenFileInfo>>;
 	unique_ptr<GlobCache> glob_cache;
-	// Database instance for logging purpose.
-	optional_ptr<DatabaseInstance> duckdb_instance;
+	// Per-instance state (shared ownership keeps state alive until all CacheFileSystems are destroyed)
+	shared_ptr<CacheHttpfsInstanceState> instance_state;
 };
 
 } // namespace duckdb

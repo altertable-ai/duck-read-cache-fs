@@ -46,14 +46,14 @@ void TestReadWithMockFileSystem(const TestCacheConfig &base_config) {
 	inst_config.enable_glob_cache = config.enable_glob_cache;
 	SetInstanceState(*db.instance, instance_state);
 
-	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem), db.instance.get());
+	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem), std::move(instance_state));
 
 	// Uncached read.
 	{
 		// Make sure it's mock file handle.
 		auto handle = cache_filesystem->OpenFile(TEST_FILENAME, FileOpenFlags::FILE_FLAGS_READ);
 		auto &cache_file_handle = handle->Cast<CacheFileSystemHandle>();
-		auto &mock_file_handle = cache_file_handle.internal_file_handle->Cast<MockFileHandle>();
+		[[maybe_unused]] auto &mock_file_handle = cache_file_handle.internal_file_handle->Cast<MockFileHandle>();
 
 		std::string buffer(TEST_FILESIZE, '\0');
 		cache_filesystem->Read(*handle, const_cast<char *>(buffer.data()), TEST_FILESIZE, /*location=*/0);
@@ -151,8 +151,8 @@ TEST_CASE("Test file metadata cache for glob invocation", "[mock filesystem test
 	// Perform glob and get file size operation.
 	auto *mock_filesystem_ptr = mock_filesystem.get();
 
-	// Create cache filesystem without database instance (simpler test case)
-	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem));
+	auto instance_state = make_shared_ptr<CacheHttpfsInstanceState>();
+	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem), std::move(instance_state));
 	cache_filesystem->Glob(FILE_PATTERN_WITH_GLOB);
 	auto file_handle = cache_filesystem->OpenFile(TEST_FILENAME, FileOpenFlags::FILE_FLAGS_READ);
 	const int64_t file_size = cache_filesystem->GetFileSize(*file_handle);
@@ -178,7 +178,8 @@ TEST_CASE("Test file attribute for glob invocation", "[mock filesystem test]") {
 
 	// Get file size and last modification timestamp.
 	auto *mock_filesystem_ptr = mock_filesystem.get();
-	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem));
+	auto instance_state = make_shared_ptr<CacheHttpfsInstanceState>();
+	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem), std::move(instance_state));
 	auto file_handle = cache_filesystem->OpenFile(TEST_FILENAME, FileOpenFlags::FILE_FLAGS_READ);
 	{
 		const int64_t file_size = cache_filesystem->GetFileSize(*file_handle);
@@ -244,7 +245,7 @@ TEST_CASE("Test clear cache", "[mock filesystem test]") {
 	instance_state->config.max_file_handle_cache_entry = config.max_file_handle_cache_entry;
 	SetInstanceState(*db.instance, instance_state);
 
-	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem), db.instance.get());
+	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem), std::move(instance_state));
 
 	auto perform_io_operation = [&]() {
 		auto handle = cache_filesystem->OpenFile(TEST_FILENAME, FileOpenFlags::FILE_FLAGS_READ);

@@ -204,6 +204,10 @@ CacheHttpfsInstanceState *GetInstanceState(DatabaseInstance &instance) {
 	return state.get();
 }
 
+shared_ptr<CacheHttpfsInstanceState> GetInstanceStateShared(DatabaseInstance &instance) {
+	return instance.GetObjectCache().Get<CacheHttpfsInstanceState>(CacheHttpfsInstanceState::CACHE_KEY);
+}
+
 CacheHttpfsInstanceState &GetInstanceStateOrThrow(DatabaseInstance &instance) {
 	auto *state = GetInstanceState(instance);
 	if (state == nullptr) {

@@ -6,6 +6,7 @@
 #include <mutex>
 
 #include "base_cache_reader.hpp"
+#include "cache_exclusion_manager.hpp"
 #include "cache_filesystem_config.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
@@ -121,6 +122,7 @@ struct CacheHttpfsInstanceState : public ObjectCacheEntry {
 	InstanceCacheFsRegistry registry;
 	InstanceCacheReaderManager cache_reader_manager;
 	InstanceConfig config;
+	CacheExclusionManager exclusion_manager;
 
 	CacheHttpfsInstanceState() = default;
 
@@ -143,6 +145,9 @@ void SetInstanceState(DatabaseInstance &instance, shared_ptr<CacheHttpfsInstance
 
 // Get instance state from DatabaseInstance (returns nullptr if not set)
 CacheHttpfsInstanceState *GetInstanceState(DatabaseInstance &instance);
+
+// Get instance state as shared_ptr from DatabaseInstance (returns nullptr if not set)
+shared_ptr<CacheHttpfsInstanceState> GetInstanceStateShared(DatabaseInstance &instance);
 
 // Get instance state, throwing if not found
 CacheHttpfsInstanceState &GetInstanceStateOrThrow(DatabaseInstance &instance);

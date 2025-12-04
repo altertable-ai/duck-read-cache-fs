@@ -36,7 +36,7 @@ void SetConfig(case_insensitive_map_t<Value> &setting, char *env_key, char *secr
 	setting[secret_key] = Value(env_val);
 }
 
-void SetOpenerConfig(shared_ptr<ClientContext> ctx, const BenchmarkSetup &benchmark_setup) {
+void SetOpenerConfig(const shared_ptr<ClientContext> &ctx, const BenchmarkSetup &benchmark_setup) {
 	auto &set_vars = ctx->config.set_variables;
 	SetConfig(set_vars, "AWS_DEFAULT_REGION", "s3_region");
 	SetConfig(set_vars, "AWS_ACCESS_KEY_ID", "s3_access_key_id");
@@ -51,7 +51,8 @@ void TestSequentialRead(const BenchmarkSetup &benchmark_setup) {
 	DuckDB db {};
 	StandardBufferManager buffer_manager {*db.instance, "/tmp/cache_httpfs_fs_benchmark"};
 	auto s3fs = make_uniq<S3FileSystem>(buffer_manager);
-	auto cache_fs = make_uniq<CacheFileSystem>(std::move(s3fs));
+	auto instance_state = make_shared_ptr<CacheHttpfsInstanceState>();
+	auto cache_fs = make_uniq<CacheFileSystem>(std::move(s3fs), std::move(instance_state));
 	auto client_context = make_shared_ptr<ClientContext>(db.instance);
 
 	SetOpenerConfig(client_context, benchmark_setup);

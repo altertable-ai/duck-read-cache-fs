@@ -1,6 +1,5 @@
 #include "cache_filesystem.hpp"
 
-#include "cache_exclusion_manager.hpp"
 #include "cache_filesystem_config.hpp"
 #include "cache_filesystem_logger.hpp"
 #include "disk_cache_reader.hpp"
@@ -19,11 +18,7 @@ constexpr const char *FILE_SIZE_INFO_KEY = "file_size";
 constexpr const char *LAST_MOD_TIMESTAMP_KEY = "last_modified";
 
 // Helper to get cache reader manager from instance state
-InstanceCacheReaderManager *GetCacheReaderManager(optional_ptr<DatabaseInstance> instance) {
-	if (!instance) {
-		return nullptr;
-	}
-	auto *state = GetInstanceState(*instance);
+InstanceCacheReaderManager *GetCacheReaderManager(CacheHttpfsInstanceState *state) {
 	if (!state) {
 		return nullptr;
 	}
@@ -31,15 +26,19 @@ InstanceCacheReaderManager *GetCacheReaderManager(optional_ptr<DatabaseInstance>
 }
 
 // Helper to get instance config
-InstanceConfig *GetInstanceConfig(optional_ptr<DatabaseInstance> instance) {
-	if (!instance) {
-		return nullptr;
-	}
-	auto *state = GetInstanceState(*instance);
+InstanceConfig *GetInstanceConfig(CacheHttpfsInstanceState *state) {
 	if (!state) {
 		return nullptr;
 	}
 	return &state->config;
+}
+
+// Helper to get exclusion manager from instance state
+CacheExclusionManager *GetExclusionManager(CacheHttpfsInstanceState *state) {
+	if (!state) {
+		return nullptr;
+	}
+	return &state->exclusion_manager;
 }
 
 } // namespace
@@ -69,7 +68,7 @@ void CacheFileSystemHandle::Close() {
 }
 
 void CacheFileSystem::SetMetadataCache() {
-	auto *config = GetInstanceConfig(duckdb_instance);
+	auto *config = GetInstanceConfig(instance_state.get());
 	bool enable = config ? config->enable_metadata_cache : DEFAULT_ENABLE_METADATA_CACHE;
 	idx_t max_entry = config ? config->max_metadata_cache_entry : DEFAULT_MAX_METADATA_CACHE_ENTRY;
 	idx_t timeout =
@@ -95,7 +94,7 @@ void CacheFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener
 }
 
 void CacheFileSystem::SetGlobCache() {
-	auto *config = GetInstanceConfig(duckdb_instance);
+	auto *config = GetInstanceConfig(instance_state.get());
 	bool enable = config ? config->enable_glob_cache : DEFAULT_ENABLE_GLOB_CACHE;
 	idx_t max_entry = config ? config->max_glob_cache_entry : DEFAULT_MAX_GLOB_CACHE_ENTRY;
 	idx_t timeout = config ? config->glob_cache_entry_timeout_millisec : DEFAULT_GLOB_CACHE_ENTRY_TIMEOUT_MILLISEC;
@@ -133,7 +132,7 @@ void CacheFileSystem::ClearFileHandleCache(const std::string &filepath) {
 }
 
 void CacheFileSystem::SetFileHandleCache() {
-	auto *config = GetInstanceConfig(duckdb_instance);
+	auto *config = GetInstanceConfig(instance_state.get());
 	bool enable = config ? config->enable_file_handle_cache : DEFAULT_ENABLE_FILE_HANDLE_CACHE;
 	idx_t max_entry = config ? config->max_file_handle_cache_entry : DEFAULT_MAX_FILE_HANDLE_CACHE_ENTRY;
 	idx_t timeout =
@@ -152,7 +151,7 @@ void CacheFileSystem::SetFileHandleCache() {
 }
 
 void CacheFileSystem::SetProfileCollector() {
-	auto *config = GetInstanceConfig(duckdb_instance);
+	auto *config = GetInstanceConfig(instance_state.get());
 	string profile_type = config ? config->profile_type : *DEFAULT_PROFILE_TYPE;
 
 	if (profile_type == *NOOP_PROFILE_TYPE) {
@@ -181,7 +180,7 @@ void CacheFileSystem::ClearCache() {
 		glob_cache->Clear();
 	}
 	ClearFileHandleCache();
-	auto *mgr = GetCacheReaderManager(duckdb_instance);
+	auto *mgr = GetCacheReaderManager(instance_state.get());
 	if (mgr) {
 		mgr->ClearCache();
 	}
@@ -195,7 +194,7 @@ void CacheFileSystem::ClearCache(const std::string &filepath) {
 		glob_cache->Clear([&filepath](const std::string &key) { return key == filepath; });
 	}
 	ClearFileHandleCache(filepath);
-	auto *mgr = GetCacheReaderManager(duckdb_instance);
+	auto *mgr = GetCacheReaderManager(instance_state.get());
 	if (mgr) {
 		mgr->ClearCache(filepath);
 	}
@@ -359,7 +358,7 @@ void CacheFileSystem::InitializeGlobalConfig(optional_ptr<FileOpener> opener) {
 	std::lock_guard<std::mutex> cache_reader_lck(cache_reader_mutex);
 
 	// Update instance config from opener
-	auto *config = GetInstanceConfig(duckdb_instance);
+	auto *config = GetInstanceConfig(instance_state.get());
 	if (config) {
 		config->UpdateFromOpener(opener);
 	}
@@ -367,9 +366,9 @@ void CacheFileSystem::InitializeGlobalConfig(optional_ptr<FileOpener> opener) {
 	SetProfileCollector();
 
 	// Initialize cache reader via instance manager
-	auto *mgr = GetCacheReaderManager(duckdb_instance);
+	auto *mgr = GetCacheReaderManager(instance_state.get());
 	if (mgr && config) {
-		mgr->SetCacheReader(*config, duckdb_instance);
+		mgr->SetCacheReader(*config, nullptr);
 	}
 
 	SetMetadataCache();
@@ -497,14 +496,15 @@ int64_t CacheFileSystem::ReadImpl(FileHandle &handle, void *buffer, int64_t nr_b
 
 	// If the source filepath matches exclusion regex, skip caching.
 	const int64_t bytes_to_read = MinValue<int64_t>(nr_bytes, file_size - location);
-	if (CacheExclusionManager::GetInstance().MatchAnyExclusion(handle.GetPath())) {
+	auto *exclusion_mgr = GetExclusionManager(instance_state.get());
+	if (exclusion_mgr && exclusion_mgr->MatchAnyExclusion(handle.GetPath())) {
 		auto &cache_handle = handle.Cast<CacheFileSystemHandle>();
 		internal_filesystem->Read(*cache_handle.internal_file_handle, buffer, nr_bytes, location);
 		return bytes_to_read;
 	}
 
 	// Leverage cache read manager.
-	auto *mgr = GetCacheReaderManager(duckdb_instance);
+	auto *mgr = GetCacheReaderManager(instance_state.get());
 	if (mgr) {
 		auto *reader = mgr->GetCacheReader();
 		if (reader) {

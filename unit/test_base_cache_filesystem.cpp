@@ -29,9 +29,10 @@ void DeleteTestFile() {
 // A more ideal unit test would be, we could check hugging face filesystem will
 // be used for certains files.
 TEST_CASE("Test cached filesystem CanHandle", "[base cache filesystem]") {
+	auto instance_state = make_shared_ptr<CacheHttpfsInstanceState>();
 	unique_ptr<FileSystem> vfs = make_uniq<VirtualFileSystem>();
-	vfs->RegisterSubSystem(make_uniq<CacheFileSystem>(make_uniq<HuggingFaceFileSystem>()));
-	vfs->RegisterSubSystem(make_uniq<CacheFileSystem>(make_uniq<LocalFileSystem>()));
+	vfs->RegisterSubSystem(make_uniq<CacheFileSystem>(make_uniq<HuggingFaceFileSystem>(), instance_state));
+	vfs->RegisterSubSystem(make_uniq<CacheFileSystem>(make_uniq<LocalFileSystem>(), std::move(instance_state)));
 
 	// VFS can handle local files with cached local filesystem.
 	auto file_handle = vfs->OpenFile(TEST_FILEPATH, FileOpenFlags::FILE_FLAGS_READ);

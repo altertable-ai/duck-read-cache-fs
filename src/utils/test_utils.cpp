@@ -1,6 +1,5 @@
 #include "test_utils.hpp"
 
-#include "cache_filesystem_config.hpp"
 #include "duckdb/common/local_file_system.hpp"
 
 namespace duckdb {
@@ -44,16 +43,15 @@ TestCacheFileSystemHelper::TestCacheFileSystemHelper(const TestCacheConfig &conf
 	}
 
 	// Register state with instance
-	SetInstanceState(*db.instance, instance_state);
+	SetInstanceState(*db.instance.get(), instance_state);
 
 	// Create cache filesystem wrapping local filesystem
-	cache_fs = make_uniq<CacheFileSystem>(LocalFileSystem::CreateLocal(), db.instance.get());
+	cache_fs = make_uniq<CacheFileSystem>(LocalFileSystem::CreateLocal(), instance_state);
 }
 
 TestCacheFileSystemHelper::~TestCacheFileSystemHelper() {
 	// Clean up cache filesystem first
 	cache_fs.reset();
-	// Instance state will be cleaned up when the DuckDB instance is destroyed
 }
 
 CacheHttpfsInstanceState *TestCacheFileSystemHelper::GetInstanceState() {

@@ -1,6 +1,5 @@
 #include "extension_config_query_function.hpp"
 
-#include "cache_exclusion_manager.hpp"
 #include "cache_filesystem_config.hpp"
 #include "cache_httpfs_instance_state.hpp"
 #include "duckdb/common/extra_type_info.hpp"
@@ -36,12 +35,14 @@ Value GetDiskCacheDirectories(const InstanceConfig &config) {
 }
 
 // Get cache exclusion regexes in duckdb [`Value`].
-Value GetCacheExclusionRegexes() {
-	auto exclusion_regexes = CacheExclusionManager::GetInstance().GetExclusionRegex();
+Value GetCacheExclusionRegexes(CacheHttpfsInstanceState *state) {
 	vector<Value> exclusion_regex_values;
-	exclusion_regex_values.reserve(exclusion_regexes.size());
-	for (auto &cur_regex : exclusion_regex_values) {
-		exclusion_regex_values.emplace_back(Value {std::move(cur_regex)});
+	if (state) {
+		auto exclusion_regexes = state->exclusion_manager.GetExclusionRegex();
+		exclusion_regex_values.reserve(exclusion_regexes.size());
+		for (auto &cur_regex : exclusion_regexes) {
+			exclusion_regex_values.emplace_back(Value {std::move(cur_regex)});
+		}
 	}
 	return Value::LIST(LogicalType {LogicalTypeId::VARCHAR}, std::move(exclusion_regex_values));
 }
@@ -420,7 +421,8 @@ void CacheConfigQueryTableFunc(ClientContext &context, TableFunctionInput &data_
 	FillGlobCacheConfig(config, output, col);
 
 	// Cache exclusion regex.
-	output.SetValue(col++, /*index=*/0, GetCacheExclusionRegexes());
+	auto *state = GetInstanceState(*context.db);
+	output.SetValue(col++, /*index=*/0, GetCacheExclusionRegexes(state));
 
 	output.SetCardinality(/*count=*/1);
 }
