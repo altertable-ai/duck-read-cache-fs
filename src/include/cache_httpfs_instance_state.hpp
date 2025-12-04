@@ -1,10 +1,9 @@
 // Per-instance state for cache_httpfs extension.
-// This replaces global singletons to support multiple DuckDB instances per process.
+// State is stored in DuckDB's ObjectCache for automatic cleanup when DatabaseInstance is destroyed.
 
 #pragma once
 
 #include <mutex>
-#include <unordered_map>
 
 #include "base_cache_reader.hpp"
 #include "duckdb/common/optional_ptr.hpp"
@@ -13,6 +12,7 @@
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/vector.hpp"
+#include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
 
@@ -114,8 +114,12 @@ struct InstanceConfig {
 
 //===--------------------------------------------------------------------===//
 // Main per-instance state container
+// Inherits from ObjectCacheEntry for automatic cleanup when DatabaseInstance is destroyed
 //===--------------------------------------------------------------------===//
-struct CacheHttpfsInstanceState {
+struct CacheHttpfsInstanceState : public ObjectCacheEntry {
+	static constexpr const char *OBJECT_TYPE = "CacheHttpfsInstanceState";
+	static constexpr const char *CACHE_KEY = "cache_httpfs_instance_state";
+
 	InstanceCacheFsRegistry registry;
 	InstanceCacheReaderManager cache_reader_manager;
 	InstanceConfig config;
@@ -123,6 +127,15 @@ struct CacheHttpfsInstanceState {
 	// Initialize with defaults
 	CacheHttpfsInstanceState() {
 		config.SetDefaults();
+	}
+
+	// ObjectCacheEntry interface
+	string GetObjectType() override {
+		return OBJECT_TYPE;
+	}
+
+	static string ObjectType() {
+		return OBJECT_TYPE;
 	}
 };
 

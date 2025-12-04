@@ -226,33 +226,16 @@ void InstanceConfig::UpdateFromOpener(optional_ptr<FileOpener> opener) {
 }
 
 //===--------------------------------------------------------------------===//
-// Instance state storage/retrieval
+// Instance state storage/retrieval using DuckDB's ObjectCache
 //===--------------------------------------------------------------------===//
 
-// Global map to store instance states - using a map from DatabaseInstance* to state
-static std::mutex &GetStateMapMutex() {
-	static std::mutex mutex;
-	return mutex;
-}
-
-static std::unordered_map<DatabaseInstance *, shared_ptr<CacheHttpfsInstanceState>> &GetStateMap() {
-	static std::unordered_map<DatabaseInstance *, shared_ptr<CacheHttpfsInstanceState>> state_map;
-	return state_map;
-}
-
 void SetInstanceState(DatabaseInstance &instance, shared_ptr<CacheHttpfsInstanceState> state) {
-	std::lock_guard<std::mutex> lock(GetStateMapMutex());
-	GetStateMap()[&instance] = std::move(state);
+	instance.GetObjectCache().Put(CacheHttpfsInstanceState::CACHE_KEY, std::move(state));
 }
 
 CacheHttpfsInstanceState *GetInstanceState(DatabaseInstance &instance) {
-	std::lock_guard<std::mutex> lock(GetStateMapMutex());
-	auto &state_map = GetStateMap();
-	auto it = state_map.find(&instance);
-	if (it == state_map.end()) {
-		return nullptr;
-	}
-	return it->second.get();
+	auto state = instance.GetObjectCache().Get<CacheHttpfsInstanceState>(CacheHttpfsInstanceState::CACHE_KEY);
+	return state.get();
 }
 
 CacheHttpfsInstanceState &GetInstanceStateOrThrow(DatabaseInstance &instance) {
