@@ -2,9 +2,8 @@
 
 #pragma once
 
-#include "base_cache_reader.hpp"
 #include "base_profile_collector.hpp"
-#include "cache_reader_manager.hpp"
+#include "cache_httpfs_instance_state.hpp"
 #include "counter.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/open_file_info.hpp"
@@ -69,11 +68,20 @@ public:
 class CacheFileSystem : public FileSystem {
 public:
 	explicit CacheFileSystem(unique_ptr<FileSystem> internal_filesystem_p,
-	                         optional_ptr<DatabaseInstance> duckdb_instance_p = nullptr)
-	    : internal_filesystem(std::move(internal_filesystem_p)), cache_reader_manager(CacheReaderManager::Get()),
-	      duckdb_instance(duckdb_instance_p) {
+	                         weak_ptr<CacheHttpfsInstanceState> instance_state_p)
+	    : internal_filesystem(std::move(internal_filesystem_p)), instance_state(std::move(instance_state_p)) {
+		// Register with per-instance registry
+		auto state = instance_state.lock();
+		if (state) {
+			state->registry.Register(this);
+		}
 	}
 	~CacheFileSystem() override {
+		// Unregister from per-instance registry before destruction
+		auto state = instance_state.lock();
+		if (state) {
+			state->registry.Unregister(this);
+		}
 		ClearFileHandleCache();
 	}
 
@@ -81,17 +89,16 @@ public:
 	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
 	// Does update file offset (which acts as `Read` semantics).
 	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
-	unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags, optional_ptr<FileOpener> opener = nullptr);
+	unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
+	                                optional_ptr<FileOpener> opener = nullptr) override;
 	std::string GetName() const override;
 	BaseProfileCollector *GetProfileCollector() const {
 		return profile_collector.get();
 	}
 	// Get file size, which attempts to get metadata cache if possible.
-	int64_t GetFileSize(FileHandle &handle);
+	int64_t GetFileSize(FileHandle &handle) override;
 	// Get last modification timestamp, which attempts to get metadata cache if possible.
 	timestamp_t GetLastModifiedTime(FileHandle &handle) override;
-	// Get cache reader manager.
-	shared_ptr<CacheReaderManager> GetCacheReaderManager();
 	// Get the internal filesystem for cache filesystem.
 	FileSystem *GetInternalFileSystem() const {
 		return internal_filesystem.get();
@@ -112,7 +119,7 @@ public:
 	// For other API calls, delegate to [internal_filesystem] to handle.
 	unique_ptr<FileHandle> OpenCompressedFile(QueryContext context, unique_ptr<FileHandle> handle,
 	                                          bool write) override {
-		auto file_handle = internal_filesystem->OpenCompressedFile(std::move(context), std::move(handle), write);
+		auto file_handle = internal_filesystem->OpenCompressedFile(context, std::move(handle), write);
 		return make_uniq<CacheFileSystemHandle>(std::move(file_handle), *this,
 		                                        /*dtor_callback=*/[](CacheFileSystemHandle & /*unused*/) {});
 	}
@@ -305,8 +312,6 @@ private:
 	std::mutex cache_reader_mutex;
 	// Used to access remote files.
 	unique_ptr<FileSystem> internal_filesystem;
-	// A global cache reader manager.
-	CacheReaderManager &cache_reader_manager;
 	// Used to profile operations.
 	unique_ptr<BaseProfileCollector> profile_collector;
 	// Metadata cache, which maps from file path to metadata.
@@ -325,8 +330,8 @@ private:
 	// Glob cache, which maps from path to filenames.
 	using GlobCache = ThreadSafeSharedLruConstCache<string, vector<OpenFileInfo>>;
 	unique_ptr<GlobCache> glob_cache;
-	// Database instance for logging purpose.
-	optional_ptr<DatabaseInstance> duckdb_instance;
+	// Per-instance state (shared ownership keeps state alive until all CacheFileSystems are destroyed)
+	weak_ptr<CacheHttpfsInstanceState> instance_state;
 };
 
 } // namespace duckdb
