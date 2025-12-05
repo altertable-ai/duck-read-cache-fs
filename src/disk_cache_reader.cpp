@@ -118,16 +118,13 @@ string GetLocalCacheFilePrefix(const string &remote_file) {
 
 // Attempt to evict cache files, if file size threshold reached.
 void EvictCacheFiles(DiskCacheReader &reader, FileSystem &local_filesystem, const string &cache_directory,
-                     const string &eviction_policy, optional_ptr<DatabaseInstance> duckdb_instance) {
+                     const string &eviction_policy) {
 	// After cache file eviction and file deletion request we cannot perform a cache dump operation immediately,
 	// because on unix platform files are only deleted physically when their last reference count goes away.
 	//
 	// For timestamp-based eviction, we simply return all the files which reaches certain threshold.
 	if (eviction_policy == *ON_DISK_CREATION_TIMESTAMP_EVICTION) {
-		const auto evicted_files = EvictStaleCacheFiles(local_filesystem, cache_directory);
-		for (const auto &cur_file : evicted_files) {
-			DUCKDB_LOG_DEBUG_OPTIONAL(duckdb_instance, StringUtil::Format("Remove disk cache file %s", cur_file));
-		}
+		EvictStaleCacheFiles(local_filesystem, cache_directory);
 		return;
 	}
 
@@ -136,7 +133,6 @@ void EvictCacheFiles(DiskCacheReader &reader, FileSystem &local_filesystem, cons
 	const auto filepath_to_evict = reader.EvictCacheBlockLru();
 	// Intentionally ignore return value.
 	local_filesystem.TryRemoveFile(filepath_to_evict);
-	DUCKDB_LOG_DEBUG_OPTIONAL(duckdb_instance, StringUtil::Format("Remove disk cache file %s", filepath_to_evict));
 }
 
 // Runtime config for DiskCacheReader (fetched from instance state or defaults)
@@ -151,28 +147,26 @@ struct DiskCacheReaderConfig {
 };
 
 // Get runtime config from instance state (returns copy with defaults if unavailable)
-DiskCacheReaderConfig GetConfig(optional_ptr<DatabaseInstance> duckdb_instance) {
+DiskCacheReaderConfig GetConfig(CacheHttpfsInstanceState *instance_state) {
 	DiskCacheReaderConfig config;
-	if (duckdb_instance) {
-		auto *state = GetInstanceState(*duckdb_instance);
-		if (state) {
-			config.cache_block_size = state->config.cache_block_size;
-			config.eviction_policy = state->config.on_disk_eviction_policy;
-			config.enable_mem_cache = state->config.enable_disk_reader_mem_cache;
-			config.mem_cache_block_count = state->config.disk_reader_max_mem_cache_block_count;
-			config.mem_cache_timeout_millisec = state->config.disk_reader_max_mem_cache_timeout_millisec;
-			config.min_disk_bytes_for_cache = state->config.min_disk_bytes_for_cache;
-			config.max_subrequest_count = state->config.max_subrequest_count;
-		}
+	if (instance_state) {
+		config.cache_block_size = instance_state->config.cache_block_size;
+		config.eviction_policy = instance_state->config.on_disk_eviction_policy;
+		config.enable_mem_cache = instance_state->config.enable_disk_reader_mem_cache;
+		config.mem_cache_block_count = instance_state->config.disk_reader_max_mem_cache_block_count;
+		config.mem_cache_timeout_millisec = instance_state->config.disk_reader_max_mem_cache_timeout_millisec;
+		config.min_disk_bytes_for_cache = instance_state->config.min_disk_bytes_for_cache;
+		config.max_subrequest_count = instance_state->config.max_subrequest_count;
 	}
 	return config;
 }
 
 } // namespace
 
-DiskCacheReader::DiskCacheReader(vector<string> cache_directories_p, optional_ptr<DatabaseInstance> duckdb_instance_p)
+DiskCacheReader::DiskCacheReader(vector<string> cache_directories_p,
+                                 shared_ptr<CacheHttpfsInstanceState> instance_state_p)
     : local_filesystem(LocalFileSystem::CreateLocal()), cache_directories(std::move(cache_directories_p)),
-      duckdb_instance(duckdb_instance_p) {
+      instance_state(std::move(instance_state_p)) {
 }
 
 string DiskCacheReader::EvictCacheBlockLru() {
@@ -190,7 +184,7 @@ string DiskCacheReader::EvictCacheBlockLru() {
 }
 
 bool DiskCacheReader::CanCacheOnDisk(const string &cache_directory) const {
-	const auto config = GetConfig(duckdb_instance);
+	const auto config = GetConfig(instance_state.get());
 
 	// Check available disk space
 	auto avai_fs_bytes = FileSystem::GetAvailableDiskSpace(cache_directory);
@@ -219,14 +213,14 @@ bool DiskCacheReader::CanCacheOnDisk(const string &cache_directory) const {
 
 void DiskCacheReader::CacheLocal(const FileHandle &handle, const string &cache_directory,
                                  const string &local_cache_file, const string &content) {
-	const auto config = GetConfig(duckdb_instance);
+	const auto config = GetConfig(instance_state.get());
 
 	// Skip local cache if insufficient disk space.
 	// It's worth noting it's not a strict check since there could be concurrent check and write operation (RMW
 	// operation), but it's acceptable since min available disk space reservation is an order of magnitude bigger than
 	// cache chunk size.
 	if (!CanCacheOnDisk(cache_directory)) {
-		EvictCacheFiles(*this, *local_filesystem, cache_directory, config.eviction_policy, duckdb_instance);
+		EvictCacheFiles(*this, *local_filesystem, cache_directory, config.eviction_policy);
 		return;
 	}
 
@@ -249,8 +243,6 @@ void DiskCacheReader::CacheLocal(const FileHandle &handle, const string &cache_d
 
 	// Then atomically move to the target postion to prevent data corruption due to concurrent write.
 	local_filesystem->MoveFile(/*source=*/local_temp_file, /*target=*/local_cache_file);
-	DUCKDB_LOG_DEBUG_OPTIONAL(duckdb_instance, StringUtil::Format("Disk cache file persisted to %s with size %zu",
-	                                                              local_cache_file, content.length()));
 }
 
 vector<DataCacheEntryInfo> DiskCacheReader::GetCacheEntriesInfo() const {
@@ -292,7 +284,7 @@ vector<DataCacheEntryInfo> DiskCacheReader::GetCacheEntriesInfo() const {
 void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t requested_start_offset,
                                    idx_t requested_bytes_to_read, idx_t file_size) {
 	// Get config once at the start to avoid repeated mutex locks
-	const auto config = GetConfig(duckdb_instance);
+	const auto config = GetConfig(instance_state.get());
 
 	std::call_once(cache_init_flag, [this, &config]() {
 		if (config.enable_mem_cache) {
@@ -364,7 +356,7 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 		// Perform read operation in parallel.
 		//
 		// TODO(hjiang): Refactor the thread function.
-		io_threads.Push([this, &handle, &config, cache_read_chunk = std::move(cache_read_chunk)]() mutable {
+		io_threads.Push([this, &handle, &config, cache_read_chunk = cache_read_chunk]() mutable {
 			SetThreadName("RdCachRdThd");
 
 			// Attempt in-memory cache block first, so potentially we don't need to access disk storage.

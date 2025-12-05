@@ -65,10 +65,11 @@ unique_ptr<GlobalTableFunctionState> DataCacheStatusQueryFuncInit(ClientContext 
 	auto &entries_info = result->cache_entries_info;
 
 	// Get instance state
-	auto *inst_state = GetInstanceState(*context.db);
+	auto inst_state = GetInstanceStateShared(*context.db);
 	if (inst_state) {
 		// Initialize disk cache reader to access on-disk cache file, even if it's not initialized before.
-		inst_state->cache_reader_manager.InitializeDiskCacheReader(inst_state->config.on_disk_cache_directories);
+		inst_state->cache_reader_manager.InitializeDiskCacheReader(inst_state->config.on_disk_cache_directories,
+		                                                           inst_state);
 
 		// Get cache entries information from all cache filesystems and all initialized cache readers.
 		auto cache_readers = inst_state->cache_reader_manager.GetCacheReaders();

@@ -24,16 +24,13 @@ struct InMemoryCacheReaderConfig {
 };
 
 // Get runtime config from instance state (returns copy with defaults if unavailable)
-InMemoryCacheReaderConfig GetConfig(optional_ptr<DatabaseInstance> duckdb_instance) {
+InMemoryCacheReaderConfig GetConfig(CacheHttpfsInstanceState *instance_state) {
 	InMemoryCacheReaderConfig config;
-	if (duckdb_instance) {
-		auto *state = GetInstanceState(*duckdb_instance);
-		if (state) {
-			config.max_cache_block_count = state->config.max_in_mem_cache_block_count;
-			config.cache_block_timeout_millisec = state->config.in_mem_cache_block_timeout_millisec;
-			config.cache_block_size = state->config.cache_block_size;
-			config.max_subrequest_count = state->config.max_subrequest_count;
-		}
+	if (instance_state) {
+		config.max_cache_block_count = instance_state->config.max_in_mem_cache_block_count;
+		config.cache_block_timeout_millisec = instance_state->config.in_mem_cache_block_timeout_millisec;
+		config.cache_block_size = instance_state->config.cache_block_size;
+		config.max_subrequest_count = instance_state->config.max_subrequest_count;
 	}
 	return config;
 }
@@ -42,7 +39,7 @@ InMemoryCacheReaderConfig GetConfig(optional_ptr<DatabaseInstance> duckdb_instan
 
 void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t requested_start_offset,
                                        idx_t requested_bytes_to_read, idx_t file_size) {
-	const auto config = GetConfig(duckdb_instance);
+	const auto config = GetConfig(instance_state.get());
 
 	std::call_once(cache_init_flag, [this, &config]() {
 		cache = make_uniq<InMemCache>(config.max_cache_block_count, config.cache_block_timeout_millisec);
@@ -109,7 +106,7 @@ void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t r
 		requested_start_offset = io_start_offset + block_size;
 
 		// Perform read operation in parallel.
-		io_threads.Push([this, &handle, block_size, cache_read_chunk = std::move(cache_read_chunk)]() mutable {
+		io_threads.Push([this, &handle, block_size, cache_read_chunk = cache_read_chunk]() mutable {
 			SetThreadName("RdCachRdThd");
 
 			// Check local cache first, see if we could do a cached read.

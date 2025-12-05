@@ -8,7 +8,7 @@
 #include "cache_filesystem_config.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/map.hpp"
-#include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/unique_ptr.hpp"
@@ -18,13 +18,13 @@
 namespace duckdb {
 
 // Forward declaration.
-class DatabaseInstance;
+struct CacheHttpfsInstanceState;
 
 class DiskCacheReader final : public BaseCacheReader {
 public:
 	// Constructor: cache_directories defines where cache files are stored.
 	explicit DiskCacheReader(vector<string> cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY},
-	                         optional_ptr<DatabaseInstance> duckdb_instance_p = nullptr);
+	                         shared_ptr<CacheHttpfsInstanceState> instance_state_p = nullptr);
 	~DiskCacheReader() override = default;
 
 	std::string GetName() const override {
@@ -68,8 +68,8 @@ private:
 	// Used to avoid local disk IO.
 	// NOTICE: cache key uses remote filepath, instead of local cache filepath.
 	unique_ptr<InMemCache> in_mem_cache_blocks;
-	// Duckdb instance for config lookup and logging.
-	optional_ptr<DatabaseInstance> duckdb_instance;
+	// Instance state for config lookup.
+	shared_ptr<CacheHttpfsInstanceState> instance_state;
 };
 
 } // namespace duckdb

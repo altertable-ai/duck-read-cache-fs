@@ -22,6 +22,7 @@ namespace duckdb {
 class CacheFileSystem;
 class DatabaseInstance;
 class FileOpener;
+struct CacheHttpfsInstanceState;
 
 //===--------------------------------------------------------------------===//
 // Per-instance filesystem registry
@@ -47,10 +48,11 @@ struct InstanceConfig;
 
 class InstanceCacheReaderManager {
 public:
-	void SetCacheReader(const InstanceConfig &config, optional_ptr<DatabaseInstance> instance);
+	void SetCacheReader(const InstanceConfig &config);
 	BaseCacheReader *GetCacheReader() const;
 	vector<BaseCacheReader *> GetCacheReaders() const;
-	void InitializeDiskCacheReader(const vector<string> &cache_directories);
+	void InitializeDiskCacheReader(const vector<string> &cache_directories,
+	                               shared_ptr<CacheHttpfsInstanceState> instance_state);
 	void ClearCache();
 	void ClearCache(const string &fname);
 	void Reset();
@@ -61,6 +63,7 @@ private:
 	unique_ptr<BaseCacheReader> in_mem_cache_reader;
 	unique_ptr<BaseCacheReader> on_disk_cache_reader;
 	BaseCacheReader *internal_cache_reader = nullptr;
+	shared_ptr<CacheHttpfsInstanceState> instance_state;
 };
 
 //===--------------------------------------------------------------------===//

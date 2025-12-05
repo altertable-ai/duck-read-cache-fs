@@ -43,7 +43,7 @@ void InstanceCacheFsRegistry::Reset() {
 // InstanceCacheReaderManager implementation
 //===--------------------------------------------------------------------===//
 
-void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config, optional_ptr<DatabaseInstance> instance) {
+void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config) {
 	std::lock_guard<std::mutex> lock(mutex);
 
 	if (config.cache_type == *NOOP_CACHE_TYPE) {
@@ -56,7 +56,7 @@ void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config, op
 
 	if (config.cache_type == *ON_DISK_CACHE_TYPE) {
 		if (on_disk_cache_reader == nullptr) {
-			on_disk_cache_reader = make_uniq<DiskCacheReader>(config.on_disk_cache_directories, instance);
+			on_disk_cache_reader = make_uniq<DiskCacheReader>(config.on_disk_cache_directories, instance_state);
 		}
 		internal_cache_reader = on_disk_cache_reader.get();
 		return;
@@ -64,7 +64,7 @@ void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config, op
 
 	if (config.cache_type == *IN_MEM_CACHE_TYPE) {
 		if (in_mem_cache_reader == nullptr) {
-			in_mem_cache_reader = make_uniq<InMemoryCacheReader>(instance);
+			in_mem_cache_reader = make_uniq<InMemoryCacheReader>(instance_state);
 		}
 		internal_cache_reader = in_mem_cache_reader.get();
 		return;
@@ -88,10 +88,12 @@ vector<BaseCacheReader *> InstanceCacheReaderManager::GetCacheReaders() const {
 	return result;
 }
 
-void InstanceCacheReaderManager::InitializeDiskCacheReader(const vector<string> &cache_directories) {
+void InstanceCacheReaderManager::InitializeDiskCacheReader(const vector<string> &cache_directories,
+                                                           shared_ptr<CacheHttpfsInstanceState> instance_state) {
 	std::lock_guard<std::mutex> lock(mutex);
+	this->instance_state = std::move(instance_state);
 	if (on_disk_cache_reader == nullptr) {
-		on_disk_cache_reader = make_uniq<DiskCacheReader>(cache_directories, nullptr);
+		on_disk_cache_reader = make_uniq<DiskCacheReader>(cache_directories, this->instance_state);
 	}
 }
 

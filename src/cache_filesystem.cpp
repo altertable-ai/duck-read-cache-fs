@@ -368,7 +368,7 @@ void CacheFileSystem::InitializeGlobalConfig(optional_ptr<FileOpener> opener) {
 	// Initialize cache reader via instance manager
 	auto *mgr = GetCacheReaderManager(instance_state.get());
 	if (mgr && config) {
-		mgr->SetCacheReader(*config, nullptr);
+		mgr->SetCacheReader(*config);
 	}
 
 	SetMetadataCache();
