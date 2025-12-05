@@ -12,7 +12,6 @@
 #include "disk_cache_reader.hpp"
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/thread.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/main/database.hpp"
 #include "utils/include/filesystem_utils.hpp"
@@ -163,8 +162,8 @@ DiskCacheReaderConfig GetConfig(CacheHttpfsInstanceState *instance_state) {
 
 } // namespace
 
-DiskCacheReader::DiskCacheReader(vector<string> cache_directories_p,
-                                 shared_ptr<CacheHttpfsInstanceState> instance_state_p)
+DiskCacheReader::DiskCacheReader(weak_ptr<CacheHttpfsInstanceState> instance_state_p,
+                                 vector<string> cache_directories_p)
     : local_filesystem(LocalFileSystem::CreateLocal()), cache_directories(std::move(cache_directories_p)),
       instance_state(std::move(instance_state_p)) {
 }
@@ -184,7 +183,7 @@ string DiskCacheReader::EvictCacheBlockLru() {
 }
 
 bool DiskCacheReader::CanCacheOnDisk(const string &cache_directory) const {
-	const auto config = GetConfig(instance_state.get());
+	const auto config = GetConfig(instance_state.lock().get());
 
 	// Check available disk space
 	auto avai_fs_bytes = FileSystem::GetAvailableDiskSpace(cache_directory);
@@ -213,7 +212,7 @@ bool DiskCacheReader::CanCacheOnDisk(const string &cache_directory) const {
 
 void DiskCacheReader::CacheLocal(const FileHandle &handle, const string &cache_directory,
                                  const string &local_cache_file, const string &content) {
-	const auto config = GetConfig(instance_state.get());
+	const auto config = GetConfig(instance_state.lock().get());
 
 	// Skip local cache if insufficient disk space.
 	// It's worth noting it's not a strict check since there could be concurrent check and write operation (RMW
@@ -234,7 +233,7 @@ void DiskCacheReader::CacheLocal(const FileHandle &handle, const string &cache_d
 		if (config.enable_mem_cache) {
 			file_open_flags |= FileOpenFlags::FILE_FLAGS_DIRECT_IO;
 		}
-		auto file_handle = local_filesystem->OpenFile(local_temp_file, std::move(file_open_flags));
+		auto file_handle = local_filesystem->OpenFile(local_temp_file, file_open_flags);
 		local_filesystem->Write(*file_handle, const_cast<char *>(content.data()),
 		                        /*nr_bytes=*/content.length(),
 		                        /*location=*/0);
@@ -284,7 +283,7 @@ vector<DataCacheEntryInfo> DiskCacheReader::GetCacheEntriesInfo() const {
 void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t requested_start_offset,
                                    idx_t requested_bytes_to_read, idx_t file_size) {
 	// Get config once at the start to avoid repeated mutex locks
-	const auto config = GetConfig(instance_state.get());
+	const auto config = GetConfig(instance_state.lock().get());
 
 	std::call_once(cache_init_flag, [this, &config]() {
 		if (config.enable_mem_cache) {
@@ -393,7 +392,7 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 			if (config.enable_mem_cache) {
 				file_open_flags |= FileOpenFlags::FILE_FLAGS_DIRECT_IO;
 			}
-			auto file_handle = local_filesystem->OpenFile(cache_destination.cache_filepath, std::move(file_open_flags));
+			auto file_handle = local_filesystem->OpenFile(cache_destination.cache_filepath, file_open_flags);
 			if (file_handle != nullptr) {
 				profile_collector->RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit);
 				DUCKDB_LOG_READ_CACHE_HIT((handle));

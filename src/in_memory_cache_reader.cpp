@@ -39,7 +39,7 @@ InMemoryCacheReaderConfig GetConfig(CacheHttpfsInstanceState *instance_state) {
 
 void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t requested_start_offset,
                                        idx_t requested_bytes_to_read, idx_t file_size) {
-	const auto config = GetConfig(instance_state.get());
+	const auto config = GetConfig(instance_state.lock().get());
 
 	std::call_once(cache_init_flag, [this, &config]() {
 		cache = make_uniq<InMemCache>(config.max_cache_block_count, config.cache_block_timeout_millisec);

@@ -2,7 +2,6 @@
 
 #pragma once
 
-#include "base_cache_reader.hpp"
 #include "base_profile_collector.hpp"
 #include "cache_httpfs_instance_state.hpp"
 #include "counter.hpp"
@@ -69,17 +68,19 @@ public:
 class CacheFileSystem : public FileSystem {
 public:
 	explicit CacheFileSystem(unique_ptr<FileSystem> internal_filesystem_p,
-	                         shared_ptr<CacheHttpfsInstanceState> instance_state_p)
+	                         weak_ptr<CacheHttpfsInstanceState> instance_state_p)
 	    : internal_filesystem(std::move(internal_filesystem_p)), instance_state(std::move(instance_state_p)) {
 		// Register with per-instance registry
-		if (instance_state) {
-			instance_state->registry.Register(this);
+		auto state = instance_state.lock();
+		if (state) {
+			state->registry.Register(this);
 		}
 	}
 	~CacheFileSystem() override {
 		// Unregister from per-instance registry before destruction
-		if (instance_state) {
-			instance_state->registry.Unregister(this);
+		auto state = instance_state.lock();
+		if (state) {
+			state->registry.Unregister(this);
 		}
 		ClearFileHandleCache();
 	}
@@ -330,7 +331,7 @@ private:
 	using GlobCache = ThreadSafeSharedLruConstCache<string, vector<OpenFileInfo>>;
 	unique_ptr<GlobCache> glob_cache;
 	// Per-instance state (shared ownership keeps state alive until all CacheFileSystems are destroyed)
-	shared_ptr<CacheHttpfsInstanceState> instance_state;
+	weak_ptr<CacheHttpfsInstanceState> instance_state;
 };
 
 } // namespace duckdb

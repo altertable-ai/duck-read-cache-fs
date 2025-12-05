@@ -1,3 +1,4 @@
+#include "cache_httpfs_instance_state.hpp"
 #define CATCH_CONFIG_RUNNER
 #include "catch.hpp"
 
@@ -37,7 +38,7 @@ void TestReadWithMockFileSystem(const TestCacheConfig &base_config) {
 
 	// We need a DuckDB instance for this test
 	DuckDB db {};
-	auto instance_state = make_shared_ptr<CacheHttpfsInstanceState>();
+	auto instance_state = GetInstanceStateShared(*db.instance.get());
 	auto &inst_config = instance_state->config;
 	inst_config.cache_type = config.cache_type;
 	inst_config.cache_block_size = config.cache_block_size;
@@ -182,8 +183,8 @@ TEST_CASE("Test file attribute for glob invocation", "[mock filesystem test]") {
 	auto cache_filesystem = make_uniq<CacheFileSystem>(std::move(mock_filesystem), std::move(instance_state));
 	auto file_handle = cache_filesystem->OpenFile(TEST_FILENAME, FileOpenFlags::FILE_FLAGS_READ);
 	{
-		const int64_t file_size = cache_filesystem->GetFileSize(*file_handle);
-		const timestamp_t last_modification_time = cache_filesystem->GetLastModifiedTime(*file_handle);
+		[[maybe_unused]] const int64_t file_size = cache_filesystem->GetFileSize(*file_handle);
+		[[maybe_unused]] const timestamp_t last_modification_time = cache_filesystem->GetLastModifiedTime(*file_handle);
 	}
 
 	// Fetch file attributes again.

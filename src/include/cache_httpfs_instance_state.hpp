@@ -48,11 +48,11 @@ struct InstanceConfig;
 
 class InstanceCacheReaderManager {
 public:
-	void SetCacheReader(const InstanceConfig &config);
+	void SetCacheReader(const InstanceConfig &config, weak_ptr<CacheHttpfsInstanceState> instance_state_p);
 	BaseCacheReader *GetCacheReader() const;
 	vector<BaseCacheReader *> GetCacheReaders() const;
 	void InitializeDiskCacheReader(const vector<string> &cache_directories,
-	                               shared_ptr<CacheHttpfsInstanceState> instance_state);
+	                               weak_ptr<CacheHttpfsInstanceState> instance_state_p);
 	void ClearCache();
 	void ClearCache(const string &fname);
 	void Reset();
@@ -63,7 +63,6 @@ private:
 	unique_ptr<BaseCacheReader> in_mem_cache_reader;
 	unique_ptr<BaseCacheReader> on_disk_cache_reader;
 	BaseCacheReader *internal_cache_reader = nullptr;
-	shared_ptr<CacheHttpfsInstanceState> instance_state;
 };
 
 //===--------------------------------------------------------------------===//

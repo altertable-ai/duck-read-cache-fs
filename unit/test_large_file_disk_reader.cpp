@@ -4,14 +4,9 @@
 #define CATCH_CONFIG_RUNNER
 #include "catch.hpp"
 
-#include "cache_filesystem_config.hpp"
-#include "disk_cache_reader.hpp"
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/thread.hpp"
 #include "duckdb/common/types/uuid.hpp"
-#include "filesystem_utils.hpp"
-#include "scope_guard.hpp"
 #include "test_utils.hpp"
 
 #include <utime.h>

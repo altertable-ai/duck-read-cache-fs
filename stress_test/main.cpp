@@ -59,7 +59,7 @@ void setup_shared_data(const std::string &extension_path, const std::string &dat
             KEY_ID 'minioadmin',
             SECRET 'minioadmin',
             REGION 'us-east-1',
-            ENDPOINT 'localhost:9000',
+            ENDPOINT 'localhost:19000',
             USE_SSL false,
             URL_STYLE 'path'
         );
@@ -110,7 +110,7 @@ struct DuckDBClient {
                 KEY_ID 'minioadmin',
                 SECRET 'minioadmin',
                 REGION 'us-east-1',
-                ENDPOINT 'localhost:9000',
+                ENDPOINT 'localhost:19000',
                 USE_SSL false,
                 URL_STYLE 'path'
             );

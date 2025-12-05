@@ -43,7 +43,8 @@ void InstanceCacheFsRegistry::Reset() {
 // InstanceCacheReaderManager implementation
 //===--------------------------------------------------------------------===//
 
-void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config) {
+void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config,
+                                                weak_ptr<CacheHttpfsInstanceState> instance_state_p) {
 	std::lock_guard<std::mutex> lock(mutex);
 
 	if (config.cache_type == *NOOP_CACHE_TYPE) {
@@ -56,7 +57,8 @@ void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config) {
 
 	if (config.cache_type == *ON_DISK_CACHE_TYPE) {
 		if (on_disk_cache_reader == nullptr) {
-			on_disk_cache_reader = make_uniq<DiskCacheReader>(config.on_disk_cache_directories, instance_state);
+			on_disk_cache_reader =
+			    make_uniq<DiskCacheReader>(std::move(instance_state_p), config.on_disk_cache_directories);
 		}
 		internal_cache_reader = on_disk_cache_reader.get();
 		return;
@@ -64,7 +66,7 @@ void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config) {
 
 	if (config.cache_type == *IN_MEM_CACHE_TYPE) {
 		if (in_mem_cache_reader == nullptr) {
-			in_mem_cache_reader = make_uniq<InMemoryCacheReader>(instance_state);
+			in_mem_cache_reader = make_uniq<InMemoryCacheReader>(std::move(instance_state_p));
 		}
 		internal_cache_reader = in_mem_cache_reader.get();
 		return;
@@ -89,11 +91,10 @@ vector<BaseCacheReader *> InstanceCacheReaderManager::GetCacheReaders() const {
 }
 
 void InstanceCacheReaderManager::InitializeDiskCacheReader(const vector<string> &cache_directories,
-                                                           shared_ptr<CacheHttpfsInstanceState> instance_state) {
+                                                           weak_ptr<CacheHttpfsInstanceState> instance_state_p) {
 	std::lock_guard<std::mutex> lock(mutex);
-	this->instance_state = std::move(instance_state);
 	if (on_disk_cache_reader == nullptr) {
-		on_disk_cache_reader = make_uniq<DiskCacheReader>(cache_directories, this->instance_state);
+		on_disk_cache_reader = make_uniq<DiskCacheReader>(std::move(instance_state_p), cache_directories);
 	}
 }
 

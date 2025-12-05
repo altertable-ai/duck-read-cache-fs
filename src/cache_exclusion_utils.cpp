@@ -4,13 +4,11 @@
 
 #include "cache_exclusion_manager.hpp"
 #include "cache_httpfs_instance_state.hpp"
-#include "duckdb/common/opener_file_system.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/main/database.hpp"
 
 namespace duckdb {
 

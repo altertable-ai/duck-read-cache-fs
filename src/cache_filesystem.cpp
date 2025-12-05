@@ -5,9 +5,7 @@
 #include "disk_cache_reader.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "in_memory_cache_reader.hpp"
-#include "noop_cache_reader.hpp"
 #include "temp_profile_collector.hpp"
-#include "utils/include/time_utils.hpp"
 
 namespace duckdb {
 
@@ -68,7 +66,7 @@ void CacheFileSystemHandle::Close() {
 }
 
 void CacheFileSystem::SetMetadataCache() {
-	auto *config = GetInstanceConfig(instance_state.get());
+	auto *config = GetInstanceConfig(instance_state.lock().get());
 	bool enable = config ? config->enable_metadata_cache : DEFAULT_ENABLE_METADATA_CACHE;
 	idx_t max_entry = config ? config->max_metadata_cache_entry : DEFAULT_MAX_METADATA_CACHE_ENTRY;
 	idx_t timeout =
@@ -94,7 +92,7 @@ void CacheFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener
 }
 
 void CacheFileSystem::SetGlobCache() {
-	auto *config = GetInstanceConfig(instance_state.get());
+	auto *config = GetInstanceConfig(instance_state.lock().get());
 	bool enable = config ? config->enable_glob_cache : DEFAULT_ENABLE_GLOB_CACHE;
 	idx_t max_entry = config ? config->max_glob_cache_entry : DEFAULT_MAX_GLOB_CACHE_ENTRY;
 	idx_t timeout = config ? config->glob_cache_entry_timeout_millisec : DEFAULT_GLOB_CACHE_ENTRY_TIMEOUT_MILLISEC;
@@ -132,7 +130,7 @@ void CacheFileSystem::ClearFileHandleCache(const std::string &filepath) {
 }
 
 void CacheFileSystem::SetFileHandleCache() {
-	auto *config = GetInstanceConfig(instance_state.get());
+	auto *config = GetInstanceConfig(instance_state.lock().get());
 	bool enable = config ? config->enable_file_handle_cache : DEFAULT_ENABLE_FILE_HANDLE_CACHE;
 	idx_t max_entry = config ? config->max_file_handle_cache_entry : DEFAULT_MAX_FILE_HANDLE_CACHE_ENTRY;
 	idx_t timeout =
@@ -151,7 +149,7 @@ void CacheFileSystem::SetFileHandleCache() {
 }
 
 void CacheFileSystem::SetProfileCollector() {
-	auto *config = GetInstanceConfig(instance_state.get());
+	auto *config = GetInstanceConfig(instance_state.lock().get());
 	string profile_type = config ? config->profile_type : *DEFAULT_PROFILE_TYPE;
 
 	if (profile_type == *NOOP_PROFILE_TYPE) {
@@ -180,7 +178,7 @@ void CacheFileSystem::ClearCache() {
 		glob_cache->Clear();
 	}
 	ClearFileHandleCache();
-	auto *mgr = GetCacheReaderManager(instance_state.get());
+	auto *mgr = GetCacheReaderManager(instance_state.lock().get());
 	if (mgr) {
 		mgr->ClearCache();
 	}
@@ -194,7 +192,7 @@ void CacheFileSystem::ClearCache(const std::string &filepath) {
 		glob_cache->Clear([&filepath](const std::string &key) { return key == filepath; });
 	}
 	ClearFileHandleCache(filepath);
-	auto *mgr = GetCacheReaderManager(instance_state.get());
+	auto *mgr = GetCacheReaderManager(instance_state.lock().get());
 	if (mgr) {
 		mgr->ClearCache(filepath);
 	}
@@ -259,7 +257,7 @@ unique_ptr<FileHandle> CacheFileSystem::CreateCacheFileHandleForRead(unique_ptr<
 		}
 
 		// Place internal file handle back to file handle cache after reset.
-		auto evicted_handle = file_handle_cache->Put(std::move(cache_key), std::move(file_handle.internal_file_handle));
+		auto evicted_handle = file_handle_cache->Put(cache_key, std::move(file_handle.internal_file_handle));
 		if (evicted_handle != nullptr) {
 			evicted_handle->Close();
 		}
@@ -279,7 +277,7 @@ shared_ptr<CacheFileSystem::FileMetadata> CacheFileSystem::Stats(FileHandle &han
 	    .file_size = file_size,
 	    .last_modification_time = last_modification_time,
 	};
-	return make_shared_ptr<FileMetadata>(std::move(file_metadata));
+	return make_shared_ptr<FileMetadata>(file_metadata);
 }
 
 vector<OpenFileInfo> CacheFileSystem::GlobImpl(const string &path, FileOpener *opener) {
@@ -320,10 +318,10 @@ vector<OpenFileInfo> CacheFileSystem::GlobImpl(const string &path, FileOpener *o
 		const timestamp_t last_modification_time = last_modification_time_value.GetValue<timestamp_t>();
 
 		FileMetadata file_metadata {
-		    .file_size = file_size_value.GetValue<int64_t>(),
+		    .file_size = file_size,
 		    .last_modification_time = last_modification_time,
 		};
-		metadata_cache->Put(filepath, make_shared_ptr<FileMetadata>(std::move(file_metadata)));
+		metadata_cache->Put(filepath, make_shared_ptr<FileMetadata>(file_metadata));
 	}
 	return open_file_info;
 }
@@ -357,8 +355,10 @@ void CacheFileSystem::InitializeGlobalConfig(optional_ptr<FileOpener> opener) {
 	// operation happening concurrently.
 	std::lock_guard<std::mutex> cache_reader_lck(cache_reader_mutex);
 
+	auto state = instance_state.lock();
+
 	// Update instance config from opener
-	auto *config = GetInstanceConfig(instance_state.get());
+	auto *config = GetInstanceConfig(state.get());
 	if (config) {
 		config->UpdateFromOpener(opener);
 	}
@@ -366,9 +366,9 @@ void CacheFileSystem::InitializeGlobalConfig(optional_ptr<FileOpener> opener) {
 	SetProfileCollector();
 
 	// Initialize cache reader via instance manager
-	auto *mgr = GetCacheReaderManager(instance_state.get());
+	auto *mgr = GetCacheReaderManager(state.get());
 	if (mgr && config) {
-		mgr->SetCacheReader(*config);
+		mgr->SetCacheReader(*config, instance_state);
 	}
 
 	SetMetadataCache();
@@ -494,9 +494,11 @@ int64_t CacheFileSystem::ReadImpl(FileHandle &handle, void *buffer, int64_t nr_b
 		return 0;
 	}
 
+	auto state = instance_state.lock();
+
 	// If the source filepath matches exclusion regex, skip caching.
 	const int64_t bytes_to_read = MinValue<int64_t>(nr_bytes, file_size - location);
-	auto *exclusion_mgr = GetExclusionManager(instance_state.get());
+	auto *exclusion_mgr = GetExclusionManager(state.get());
 	if (exclusion_mgr && exclusion_mgr->MatchAnyExclusion(handle.GetPath())) {
 		auto &cache_handle = handle.Cast<CacheFileSystemHandle>();
 		internal_filesystem->Read(*cache_handle.internal_file_handle, buffer, nr_bytes, location);
@@ -504,7 +506,7 @@ int64_t CacheFileSystem::ReadImpl(FileHandle &handle, void *buffer, int64_t nr_b
 	}
 
 	// Leverage cache read manager.
-	auto *mgr = GetCacheReaderManager(instance_state.get());
+	auto *mgr = GetCacheReaderManager(state.get());
 	if (mgr) {
 		auto *reader = mgr->GetCacheReader();
 		if (reader) {

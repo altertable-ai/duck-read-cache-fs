@@ -1,7 +1,6 @@
 #include "cache_status_query_function.hpp"
 
 #include <algorithm>
-#include <array>
 
 #include "cache_entry_info.hpp"
 #include "cache_filesystem.hpp"
@@ -253,10 +252,10 @@ void CacheAccessInfoQueryTableFunc(ClientContext &context, TableFunctionInput &d
 		output.SetValue(col++, count, Value::BIGINT(NumericCast<uint64_t>(entry.cache_miss_by_in_use)));
 
 		// Used for data cache, total number of bytes to read.
-		output.SetValue(col++, count, std::move(entry.total_bytes_to_read));
+		output.SetValue(col++, count, entry.total_bytes_to_read);
 
 		// Used for data cache, total number of bytes to cache.
-		output.SetValue(col++, count, std::move(entry.total_bytes_to_cache));
+		output.SetValue(col++, count, entry.total_bytes_to_cache);
 
 		count++;
 	}

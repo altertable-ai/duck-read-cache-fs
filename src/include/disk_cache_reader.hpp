@@ -23,8 +23,8 @@ struct CacheHttpfsInstanceState;
 class DiskCacheReader final : public BaseCacheReader {
 public:
 	// Constructor: cache_directories defines where cache files are stored.
-	explicit DiskCacheReader(vector<string> cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY},
-	                         shared_ptr<CacheHttpfsInstanceState> instance_state_p = nullptr);
+	explicit DiskCacheReader(weak_ptr<CacheHttpfsInstanceState> instance_state_p,
+	                         vector<string> cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY});
 	~DiskCacheReader() override = default;
 
 	std::string GetName() const override {
@@ -69,7 +69,7 @@ private:
 	// NOTICE: cache key uses remote filepath, instead of local cache filepath.
 	unique_ptr<InMemCache> in_mem_cache_blocks;
 	// Instance state for config lookup.
-	shared_ptr<CacheHttpfsInstanceState> instance_state;
+	weak_ptr<CacheHttpfsInstanceState> instance_state;
 };
 
 } // namespace duckdb
