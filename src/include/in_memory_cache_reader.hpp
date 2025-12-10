@@ -17,11 +17,11 @@ class InMemoryCacheReader final : public BaseCacheReader {
 public:
 	// Constructor: config values are read from instance state at runtime (with defaults as fallback).
 	explicit InMemoryCacheReader(weak_ptr<CacheHttpfsInstanceState> instance_state_p)
-	    : instance_state(std::move(instance_state_p)) {
+	    : BaseCacheReader(std::move(instance_state_p)) {
 	}
 	~InMemoryCacheReader() override = default;
 
-	std::string GetName() const override {
+	string GetName() const override {
 		return "in_mem_cache_reader";
 	}
 
@@ -43,9 +43,6 @@ private:
 
 	// Return whether the given cache entry is still valid and usable.
 	bool ValidateCacheEntry(InMemCacheEntry *cache_entry, const string &version_tag);
-
-	// Instance state for config lookup.
-	weak_ptr<CacheHttpfsInstanceState> instance_state;
 
 	// Once flag to guard against cache's initialization.
 	std::once_flag cache_init_flag;

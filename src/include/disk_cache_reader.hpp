@@ -5,7 +5,6 @@
 #include <mutex>
 
 #include "base_cache_reader.hpp"
-#include "cache_filesystem_config.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/shared_ptr.hpp"
@@ -26,7 +25,7 @@ public:
 	explicit DiskCacheReader(weak_ptr<CacheHttpfsInstanceState> instance_state_p);
 	~DiskCacheReader() override = default;
 
-	std::string GetName() const override {
+	string GetName() const override {
 		return "on_disk_cache_reader";
 	}
 
@@ -75,8 +74,6 @@ private:
 	// Used to avoid local disk IO.
 	// NOTICE: cache key uses remote filepath, instead of local cache filepath.
 	unique_ptr<InMemCache> in_mem_cache_blocks;
-	// Instance state for config lookup.
-	weak_ptr<CacheHttpfsInstanceState> instance_state;
 };
 
 } // namespace duckdb

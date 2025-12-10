@@ -6,6 +6,7 @@
 #include "duckdb/storage/standard_buffer_manager.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/database.hpp"
+#include "filesystem_utils.hpp"
 #include "s3fs.hpp"
 
 #include <array>
@@ -62,7 +63,7 @@ void ReadUncachedWholeFile(uint64_t block_size) {
 	auto s3fs = make_uniq<S3FileSystem>(buffer_manager);
 
 	// Use default cache directory
-	vector<string> cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY};
+	vector<string> cache_directories = {GetDefaultOnDiskCacheDirectory()};
 	for (const auto &cur_cache_dir : cache_directories) {
 		LocalFileSystem::CreateLocal()->RemoveDirectory(cur_cache_dir);
 	}

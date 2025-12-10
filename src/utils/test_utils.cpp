@@ -56,4 +56,8 @@ InstanceConfig &TestCacheFileSystemHelper::GetConfig() {
 	return instance_state->config;
 }
 
+BaseProfileCollector &TestCacheFileSystemHelper::GetProfileCollector(connection_t connection_id) {
+	return *instance_state->profile_collector_manager.GetProfileCollector(connection_id);
+}
+
 } // namespace duckdb

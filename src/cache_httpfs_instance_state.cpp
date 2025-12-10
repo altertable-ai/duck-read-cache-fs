@@ -8,6 +8,8 @@
 #include "duckdb/main/database.hpp"
 #include "in_memory_cache_reader.hpp"
 #include "noop_cache_reader.hpp"
+#include "noop_profile_collector.hpp"
+#include "temp_profile_collector.hpp"
 
 namespace duckdb {
 
@@ -16,23 +18,70 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 
 void InstanceCacheFsRegistry::Register(CacheFileSystem *fs) {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 	cache_filesystems.insert(fs);
 }
 
 void InstanceCacheFsRegistry::Unregister(CacheFileSystem *fs) {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 	cache_filesystems.erase(fs);
 }
 
 unordered_set<CacheFileSystem *> InstanceCacheFsRegistry::GetAllCacheFs() const {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 	return cache_filesystems;
 }
 
 void InstanceCacheFsRegistry::Reset() {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 	cache_filesystems.clear();
+}
+
+//===--------------------------------------------------------------------===//
+// InstanceProfileCollectorManager implementation
+//===--------------------------------------------------------------------===//
+
+void InstanceProfileCollectorManager::SetProfileCollector(connection_t connection_id, const string &profile_type) {
+	concurrency::lock_guard<concurrency::mutex> lock(mutex);
+
+	auto it = profile_collectors.find(connection_id);
+
+	// Check if we already have the right type for this connection
+	if (it != profile_collectors.end() && it->second != nullptr && it->second->GetProfilerType() == profile_type) {
+		return; // Already have the right type
+	}
+
+	if (profile_type == *NOOP_PROFILE_TYPE) {
+		profile_collectors[connection_id] = make_uniq<NoopProfileCollector>();
+		return;
+	}
+
+	if (profile_type == *TEMP_PROFILE_TYPE) {
+		profile_collectors[connection_id] = make_uniq<TempProfileCollector>();
+		return;
+	}
+
+	// Default to noop if unknown type and no collector exists for this connection
+	if (it == profile_collectors.end() || it->second == nullptr) {
+		profile_collectors[connection_id] = make_uniq<NoopProfileCollector>();
+	}
+}
+
+BaseProfileCollector *InstanceProfileCollectorManager::GetProfileCollector(connection_t connection_id) const {
+	concurrency::lock_guard<concurrency::mutex> lock(mutex);
+	auto it = profile_collectors.find(connection_id);
+	if (it != profile_collectors.end()) {
+		return it->second.get();
+	}
+	return nullptr;
+}
+
+void InstanceProfileCollectorManager::ResetProfileCollector(connection_t connection_id) {
+	concurrency::lock_guard<concurrency::mutex> lock(mutex);
+	auto it = profile_collectors.find(connection_id);
+	if (it != profile_collectors.end() && it->second != nullptr) {
+		it->second->Reset();
+	}
 }
 
 //===--------------------------------------------------------------------===//
@@ -41,7 +90,7 @@ void InstanceCacheFsRegistry::Reset() {
 
 void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config,
                                                 weak_ptr<CacheHttpfsInstanceState> instance_state_p) {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 
 	if (config.cache_type == *ON_DISK_CACHE_TYPE) {
 		if (on_disk_cache_reader == nullptr) {
@@ -61,19 +110,19 @@ void InstanceCacheReaderManager::SetCacheReader(const InstanceConfig &config,
 
 	// Fallback to NoopCacheReader.
 	if (noop_cache_reader == nullptr) {
-		noop_cache_reader = make_uniq<NoopCacheReader>();
+		noop_cache_reader = make_uniq<NoopCacheReader>(std::move(instance_state_p));
 	}
 
 	internal_cache_reader = noop_cache_reader.get();
 }
 
 BaseCacheReader *InstanceCacheReaderManager::GetCacheReader() const {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 	return internal_cache_reader;
 }
 
 vector<BaseCacheReader *> InstanceCacheReaderManager::GetCacheReaders() const {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 	vector<BaseCacheReader *> result;
 	if (in_mem_cache_reader != nullptr) {
 		result.emplace_back(in_mem_cache_reader.get());
@@ -86,14 +135,14 @@ vector<BaseCacheReader *> InstanceCacheReaderManager::GetCacheReaders() const {
 
 void InstanceCacheReaderManager::InitializeDiskCacheReader(const vector<string> &cache_directories,
                                                            weak_ptr<CacheHttpfsInstanceState> instance_state_p) {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 	if (on_disk_cache_reader == nullptr) {
 		on_disk_cache_reader = make_uniq<DiskCacheReader>(std::move(instance_state_p));
 	}
 }
 
 void InstanceCacheReaderManager::ClearCache() {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 	if (noop_cache_reader != nullptr) {
 		noop_cache_reader->ClearCache();
 	}
@@ -106,7 +155,7 @@ void InstanceCacheReaderManager::ClearCache() {
 }
 
 void InstanceCacheReaderManager::ClearCache(const string &fname) {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 	if (noop_cache_reader != nullptr) {
 		noop_cache_reader->ClearCache(fname);
 	}
@@ -119,16 +168,12 @@ void InstanceCacheReaderManager::ClearCache(const string &fname) {
 }
 
 void InstanceCacheReaderManager::Reset() {
-	const std::lock_guard<std::mutex> lock(mutex);
+	const concurrency::lock_guard<concurrency::mutex> lock(mutex);
 	noop_cache_reader.reset();
 	in_mem_cache_reader.reset();
 	on_disk_cache_reader.reset();
 	internal_cache_reader = nullptr;
 }
-
-//===--------------------------------------------------------------------===//
-// InstanceConfig implementation
-//===--------------------------------------------------------------------===//
 
 //===--------------------------------------------------------------------===//
 // Instance state storage/retrieval using DuckDB's ObjectCache

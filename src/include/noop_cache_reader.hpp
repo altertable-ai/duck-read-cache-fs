@@ -7,12 +7,18 @@
 #include "base_cache_reader.hpp"
 #include "base_profile_collector.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 
 namespace duckdb {
 
+// Forward declaration.
+struct CacheHttpfsInstanceState;
+
 class NoopCacheReader : public BaseCacheReader {
 public:
-	NoopCacheReader() = default;
+	explicit NoopCacheReader(weak_ptr<CacheHttpfsInstanceState> instance_state_p)
+	    : BaseCacheReader(std::move(instance_state_p)) {
+	}
 	virtual ~NoopCacheReader() = default;
 
 	void ClearCache() override {
@@ -26,7 +32,7 @@ public:
 		return {};
 	}
 
-	std::string GetName() const override {
+	string GetName() const override {
 		return "noop_cache_reader";
 	}
 };

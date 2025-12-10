@@ -19,7 +19,8 @@ namespace duckdb {
 inline const NoDestructor<string> NOOP_CACHE_TYPE {"noop"};
 inline const NoDestructor<string> ON_DISK_CACHE_TYPE {"on_disk"};
 inline const NoDestructor<string> IN_MEM_CACHE_TYPE {"in_mem"};
-inline const std::unordered_set<string> ALL_CACHE_TYPES {*NOOP_CACHE_TYPE, *ON_DISK_CACHE_TYPE, *IN_MEM_CACHE_TYPE};
+inline const NoDestructor<unordered_set<string>> ALL_CACHE_TYPES {
+    {*NOOP_CACHE_TYPE, *ON_DISK_CACHE_TYPE, *IN_MEM_CACHE_TYPE}};
 
 // Creation timestamp-based on-disk eviction policy.
 inline const NoDestructor<string> ON_DISK_CREATION_TIMESTAMP_EVICTION {"creation_timestamp"};
@@ -39,7 +40,6 @@ inline const NoDestructor<std::unordered_set<string>> ALL_PROFILE_TYPES {
 // Default configuration
 //===--------------------------------------------------------------------===//
 inline const idx_t DEFAULT_CACHE_BLOCK_SIZE = 512_KiB;
-inline const NoDestructor<string> DEFAULT_ON_DISK_CACHE_DIRECTORY {"/tmp/duckdb_cache_httpfs_cache"};
 
 // Default to use on-disk cache filesystem.
 inline NoDestructor<string> DEFAULT_CACHE_TYPE {*ON_DISK_CACHE_TYPE};

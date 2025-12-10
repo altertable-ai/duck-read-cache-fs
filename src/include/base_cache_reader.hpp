@@ -5,18 +5,24 @@
 
 #pragma once
 
-#include "base_cache_reader.hpp"
 #include "base_profile_collector.hpp"
 #include "cache_entry_info.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector.hpp"
 
 namespace duckdb {
 
+// Forward declaration.
+struct CacheHttpfsInstanceState;
+
 class BaseCacheReader {
 public:
-	BaseCacheReader() = default;
+	explicit BaseCacheReader(weak_ptr<CacheHttpfsInstanceState> instance_state_p)
+	    : instance_state(std::move(instance_state_p)) {
+	}
 	virtual ~BaseCacheReader() = default;
 	BaseCacheReader(const BaseCacheReader &) = delete;
 	BaseCacheReader &operator=(const BaseCacheReader &) = delete;
@@ -37,18 +43,12 @@ public:
 	virtual void ClearCache(const string &fname) = 0;
 
 	// Get name for cache reader.
-	virtual std::string GetName() const {
+	virtual string GetName() const {
 		throw NotImplementedException("Base cache reader doesn't implement GetName.");
 	}
 
-	void SetProfileCollector(BaseProfileCollector *profile_collector_p) {
-		profile_collector = profile_collector_p;
-		profile_collector->SetCacheReaderType(GetName());
-	}
-
-	BaseProfileCollector *GetProfileCollector() const {
-		return profile_collector;
-	}
+	// Get the profile collector for the given connection ID.
+	BaseProfileCollector &GetProfileCollector(connection_t connection_id) const;
 
 	template <class TARGET>
 	TARGET &Cast() {
@@ -62,8 +62,7 @@ public:
 	}
 
 protected:
-	// Ownership lies in cache filesystem.
-	BaseProfileCollector *profile_collector = nullptr;
+	weak_ptr<CacheHttpfsInstanceState> instance_state;
 };
 
 } // namespace duckdb

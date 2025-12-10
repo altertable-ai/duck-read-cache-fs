@@ -3,9 +3,8 @@
 
 #pragma once
 
-#include <mutex>
-
 #include "base_cache_reader.hpp"
+#include "base_profile_collector.hpp"
 #include "cache_exclusion_manager.hpp"
 #include "cache_filesystem_config.hpp"
 #include "duckdb/common/optional_ptr.hpp"
@@ -13,9 +12,13 @@
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/storage/object_cache.hpp"
+#include "filesystem_utils.hpp"
+#include "mutex.hpp"
+#include "thread_annotation.hpp"
 
 namespace duckdb {
 
@@ -40,16 +43,36 @@ public:
 	void Reset();
 
 private:
-	mutable std::mutex mutex;
-	unordered_set<CacheFileSystem *> cache_filesystems;
+	mutable concurrency::mutex mutex;
+	unordered_set<CacheFileSystem *> cache_filesystems DUCKDB_GUARDED_BY(mutex);
+};
+
+//===--------------------------------------------------------------------===//
+// Per-connection profile collector manager
+//===--------------------------------------------------------------------===//
+
+// Forward declaration
+struct InstanceConfig;
+
+// Manages per-connection profile collectors.
+// Each connection has its own profiler so stats can be tracked independently.
+class InstanceProfileCollectorManager {
+public:
+	// Initialize or update the profile collector for a specific connection
+	void SetProfileCollector(connection_t connection_id, const string &profile_type);
+	// Get the profile collector for a specific connection (may be null if not initialized)
+	BaseProfileCollector *GetProfileCollector(connection_t connection_id) const;
+	// Reset the profile collector for a specific connection
+	void ResetProfileCollector(connection_t connection_id);
+
+private:
+	mutable concurrency::mutex mutex;
+	unordered_map<connection_t, unique_ptr<BaseProfileCollector>> profile_collectors DUCKDB_GUARDED_BY(mutex);
 };
 
 //===--------------------------------------------------------------------===//
 // Per-instance cache reader manager
 //===--------------------------------------------------------------------===//
-
-// Forward declaration
-struct InstanceConfig;
 
 class InstanceCacheReaderManager {
 public:
@@ -63,11 +86,11 @@ public:
 	void Reset();
 
 private:
-	mutable std::mutex mutex;
-	unique_ptr<BaseCacheReader> noop_cache_reader;
-	unique_ptr<BaseCacheReader> in_mem_cache_reader;
-	unique_ptr<BaseCacheReader> on_disk_cache_reader;
-	BaseCacheReader *internal_cache_reader = nullptr;
+	mutable concurrency::mutex mutex;
+	unique_ptr<BaseCacheReader> noop_cache_reader DUCKDB_GUARDED_BY(mutex);
+	unique_ptr<BaseCacheReader> in_mem_cache_reader DUCKDB_GUARDED_BY(mutex);
+	unique_ptr<BaseCacheReader> on_disk_cache_reader DUCKDB_GUARDED_BY(mutex);
+	BaseCacheReader *internal_cache_reader DUCKDB_GUARDED_BY(mutex) = nullptr;
 };
 
 //===--------------------------------------------------------------------===//
@@ -82,7 +105,7 @@ struct InstanceConfig {
 	bool ignore_sigpipe = DEFAULT_IGNORE_SIGPIPE;
 
 	// On-disk cache config
-	vector<string> on_disk_cache_directories = {*DEFAULT_ON_DISK_CACHE_DIRECTORY};
+	vector<string> on_disk_cache_directories = {GetDefaultOnDiskCacheDirectory()};
 	idx_t min_disk_bytes_for_cache = DEFAULT_MIN_DISK_BYTES_FOR_CACHE;
 	string on_disk_eviction_policy = *DEFAULT_ON_DISK_EVICTION_POLICY;
 
@@ -122,12 +145,10 @@ struct CacheHttpfsInstanceState : public ObjectCacheEntry {
 	static constexpr const char *OBJECT_TYPE = "CacheHttpfsInstanceState";
 	static constexpr const char *CACHE_KEY = "cache_httpfs_instance_state";
 
-	// Extension config for the current duckdb instance.
 	InstanceConfig config;
-	// Cache filesystem registry.
 	InstanceCacheFsRegistry registry;
-
 	InstanceCacheReaderManager cache_reader_manager;
+	InstanceProfileCollectorManager profile_collector_manager;
 	CacheExclusionManager exclusion_manager;
 
 	CacheHttpfsInstanceState() = default;
