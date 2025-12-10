@@ -139,8 +139,8 @@ unique_ptr<FunctionData> CacheAccessInfoQueryFuncBind(ClientContext &context, Ta
 	D_ASSERT(return_types.empty());
 	D_ASSERT(names.empty());
 
-	return_types.reserve(6);
-	names.reserve(6);
+	return_types.reserve(8);
+	names.reserve(8);
 
 	// Cache type.
 	return_types.emplace_back(LogicalType {LogicalTypeId::VARCHAR});
@@ -165,6 +165,14 @@ unique_ptr<FunctionData> CacheAccessInfoQueryFuncBind(ClientContext &context, Ta
 	// Used for data cache, total number of bytes to cache.
 	return_types.emplace_back(LogicalType {LogicalTypeId::UBIGINT});
 	names.emplace_back("number_bytes_to_cache (data cache)");
+
+	// Used for data cache, bytes read from cache (hits).
+	return_types.emplace_back(LogicalType {LogicalTypeId::UBIGINT});
+	names.emplace_back("bytes_read_from_hits (data cache)");
+
+	// Used for data cache, bytes read from remote (misses).
+	return_types.emplace_back(LogicalType {LogicalTypeId::UBIGINT});
+	names.emplace_back("bytes_read_from_misses (data cache)");
 
 	return nullptr;
 }
@@ -219,6 +227,28 @@ unique_ptr<GlobalTableFunctionState> CacheAccessInfoQueryFuncInit(ClientContext 
 				total_bytes_to_cache =
 				    Value::UBIGINT(cache_value + cur_cache_access_info.total_bytes_to_cache.GetValue<uint64_t>());
 			}
+
+			// Handle bytes read from cache.
+			auto &bytes_read_from_hits = aggregated_cache_access_infos[idx].bytes_read_from_hits;
+			uint64_t cache_hit_bytes = 0;
+			if (!bytes_read_from_hits.IsNull()) {
+				cache_hit_bytes = bytes_read_from_hits.GetValue<uint64_t>();
+			}
+			if (!cur_cache_access_info.bytes_read_from_hits.IsNull()) {
+				bytes_read_from_hits =
+				    Value::UBIGINT(cache_hit_bytes + cur_cache_access_info.bytes_read_from_hits.GetValue<uint64_t>());
+			}
+
+			// Handle bytes read from remote.
+			auto &bytes_read_from_misses = aggregated_cache_access_infos[idx].bytes_read_from_misses;
+			uint64_t cache_miss_bytes = 0;
+			if (!bytes_read_from_misses.IsNull()) {
+				cache_miss_bytes = bytes_read_from_misses.GetValue<uint64_t>();
+			}
+			if (!cur_cache_access_info.bytes_read_from_misses.IsNull()) {
+				bytes_read_from_misses = Value::UBIGINT(
+				    cache_miss_bytes + cur_cache_access_info.bytes_read_from_misses.GetValue<uint64_t>());
+			}
 		}
 	}
 
@@ -256,6 +286,12 @@ void CacheAccessInfoQueryTableFunc(ClientContext &context, TableFunctionInput &d
 
 		// Used for data cache, total number of bytes to cache.
 		output.SetValue(col++, count, entry.total_bytes_to_cache);
+
+		// Used for data cache, bytes read from cache (hits).
+		output.SetValue(col++, count, entry.bytes_read_from_hits);
+
+		// Used for data cache, bytes read from remote (misses).
+		output.SetValue(col++, count, entry.bytes_read_from_misses);
 
 		count++;
 	}

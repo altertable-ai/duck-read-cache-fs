@@ -155,7 +155,8 @@ void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t r
 
 			if (cache_entry != nullptr) {
 				if (profile_collector) {
-					profile_collector->RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit);
+					profile_collector->RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit,
+					                                     cache_read_chunk.bytes_to_copy);
 				}
 				DUCKDB_LOG_OPEN_CACHE_HIT((handle));
 				cache_read_chunk.CopyBufferToRequestedMemory(cache_entry->data);
@@ -164,7 +165,8 @@ void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t r
 
 			// We suffer a cache loss, fallback to remote access then local filesystem write.
 			if (profile_collector) {
-				profile_collector->RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheMiss);
+				profile_collector->RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheMiss,
+				                                     cache_read_chunk.bytes_to_copy);
 			}
 			DUCKDB_LOG_OPEN_CACHE_MISS((handle));
 			auto content = CreateResizeUninitializedString(cache_read_chunk.chunk_size);
