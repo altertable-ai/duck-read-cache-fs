@@ -62,6 +62,9 @@ private:
 	// Otherwise, nothing happens.
 	void CacheLocal(const FileHandle &handle, const string &cache_directory, const string &local_cache_file,
 	                const string &content, const string &version_tag);
+	
+	// Get filesystem for the given cache directory (nvmefs:// or regular path)
+	FileSystem &GetFileSystemForCacheDirectory(const string &cache_directory);
 
 	// Used to access local cache files.
 	unique_ptr<FileSystem> local_filesystem;

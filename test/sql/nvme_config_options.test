@@ -1,0 +1,49 @@
+# name: test/sql/nvme_config_options.test
+# description: Test NVMe-specific configuration options
+# group: [sql]
+
+require cache_httpfs
+
+# Test 1: NVMe device path configuration
+statement ok
+SET cache_httpfs_nvme_device_path = '/dev/nvme0n1';
+
+# Test 2: NVMe backend configuration (default is 'nvme')
+statement ok
+SET cache_httpfs_nvme_backend = 'nvme';
+
+# Test 3: Test different backends (should accept without error even if not functional)
+statement ok
+SET cache_httpfs_nvme_backend = 'io_uring_cmd';
+
+statement ok
+SET cache_httpfs_nvme_backend = 'libaio';
+
+statement ok
+SET cache_httpfs_nvme_backend = 'spdk';
+
+# Reset to default
+statement ok
+SET cache_httpfs_nvme_backend = 'nvme';
+
+# Test 4: Async I/O configuration
+statement ok
+SET cache_httpfs_nvme_async = false;
+
+statement ok
+SET cache_httpfs_nvme_async = true;
+
+# Reset to sync
+statement ok
+SET cache_httpfs_nvme_async = false;
+
+# Test 5: Max threads configuration
+statement ok
+SET cache_httpfs_nvme_max_threads = 4;
+
+statement ok
+SET cache_httpfs_nvme_max_threads = 16;
+
+# Reset to default
+statement ok
+SET cache_httpfs_nvme_max_threads = 8;

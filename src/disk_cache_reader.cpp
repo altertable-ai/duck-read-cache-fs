@@ -11,6 +11,7 @@
 #include "crypto.hpp"
 #include "disk_cache_reader.hpp"
 #include "duckdb/common/local_file_system.hpp"
+#include "duckdb/common/opener_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "utils/include/chunk_utils.hpp"
@@ -140,6 +141,21 @@ DiskCacheReader::DiskCacheReader(weak_ptr<CacheHttpfsInstanceState> instance_sta
     : local_filesystem(LocalFileSystem::CreateLocal()), instance_state(std::move(instance_state_p)) {
 }
 
+FileSystem &DiskCacheReader::GetFileSystemForCacheDirectory(const string &cache_directory) {
+	// Check if cache directory uses nvmefs:// scheme
+	if (StringUtil::StartsWith(cache_directory, "nvmefs://")) {
+		// Use VirtualFileSystem from DatabaseInstance
+		auto inst_state_ptr = instance_state.lock();
+		if (!inst_state_ptr || !inst_state_ptr->db_instance) {
+			throw InternalException("Cannot access DatabaseInstance for nvmefs:// cache directory");
+		}
+		auto &opener_fs = inst_state_ptr->db_instance->GetFileSystem().Cast<OpenerFileSystem>();
+		return opener_fs.GetFileSystem();
+	}
+	// Use LocalFileSystem for regular paths
+	return *local_filesystem;
+}
+
 string DiskCacheReader::EvictCacheBlockLru() {
 	const std::lock_guard<std::mutex> lck(cache_file_creation_timestamp_map_mutex);
 	// Initialize file creation timestamp map, which should be called only once.
@@ -181,12 +197,15 @@ void DiskCacheReader::CacheLocal(const FileHandle &handle, const string &cache_d
                                  const string &local_cache_file, const string &content, const string &version_tag) {
 	const auto config = GetInstanceConfig(instance_state);
 
+	// Get the appropriate filesystem for this cache directory
+	FileSystem &cache_fs = GetFileSystemForCacheDirectory(cache_directory);
+
 	// Skip local cache if insufficient disk space.
 	// It's worth noting it's not a strict check since there could be concurrent check and write operation (RMW
 	// operation), but it's acceptable since min available disk space reservation is an order of magnitude bigger than
 	// cache chunk size.
 	if (!CanCacheOnDisk(cache_directory, config.cache_block_size, config.min_disk_bytes_for_cache)) {
-		EvictCacheFiles(*this, *local_filesystem, cache_directory, config.on_disk_eviction_policy);
+		EvictCacheFiles(*this, cache_fs, cache_directory, config.on_disk_eviction_policy);
 		return;
 	}
 
@@ -200,18 +219,19 @@ void DiskCacheReader::CacheLocal(const FileHandle &handle, const string &cache_d
 		if (config.enable_disk_reader_mem_cache) {
 			file_open_flags |= FileOpenFlags::FILE_FLAGS_DIRECT_IO;
 		}
-		auto file_handle = local_filesystem->OpenFile(local_temp_file, file_open_flags);
-		local_filesystem->Write(*file_handle, const_cast<char *>(content.data()),
-		                        /*nr_bytes=*/content.length(),
-		                        /*location=*/0);
+		auto file_handle = cache_fs.OpenFile(local_temp_file, file_open_flags);
+		cache_fs.Write(*file_handle, const_cast<char *>(content.data()),
+		               /*nr_bytes=*/content.length(),
+		               /*location=*/0);
 		file_handle->Sync();
 	}
 
 	// Then atomically move to the target postion to prevent data corruption due to concurrent write.
-	local_filesystem->MoveFile(/*source=*/local_temp_file, /*target=*/local_cache_file);
+	cache_fs.MoveFile(/*source=*/local_temp_file, /*target=*/local_cache_file);
 	//
 	// Store version tag in extended attributes for validation.
-	if (!version_tag.empty()) {
+	// Note: For nvmefs://, extended attributes are not supported, validation will be disabled
+	if (!version_tag.empty() && !StringUtil::StartsWith(cache_directory, "nvmefs://")) {
 		SetCacheVersion(local_cache_file, version_tag);
 	}
 }
@@ -237,17 +257,18 @@ vector<DataCacheEntryInfo> DiskCacheReader::GetCacheEntriesInfo() const {
 	// Fill in on disk cache entries.
 	const auto &cache_directories = GetInstanceConfig(instance_state).on_disk_cache_directories;
 	for (const auto &cur_cache_dir : cache_directories) {
-		local_filesystem->ListFiles(cur_cache_dir,
-		                            [&cache_entries_info, cur_cache_dir](const std::string &fname, bool /*unused*/) {
-			                            auto remote_file_info = GetRemoteFileInfo(fname);
-			                            cache_entries_info.emplace_back(DataCacheEntryInfo {
-			                                .cache_filepath = StringUtil::Format("%s/%s", cur_cache_dir, fname),
-			                                .remote_filename = std::get<0>(remote_file_info),
-			                                .start_offset = std::get<1>(remote_file_info),
-			                                .end_offset = std::get<2>(remote_file_info),
-			                                .cache_type = "on-disk",
-			                            });
-		                            });
+		FileSystem &cache_fs = const_cast<DiskCacheReader *>(this)->GetFileSystemForCacheDirectory(cur_cache_dir);
+		cache_fs.ListFiles(cur_cache_dir,
+		                   [&cache_entries_info, cur_cache_dir](const std::string &fname, bool /*unused*/) {
+			                   auto remote_file_info = GetRemoteFileInfo(fname);
+			                   cache_entries_info.emplace_back(DataCacheEntryInfo {
+			                       .cache_filepath = StringUtil::Format("%s/%s", cur_cache_dir, fname),
+			                       .remote_filename = std::get<0>(remote_file_info),
+			                       .start_offset = std::get<1>(remote_file_info),
+			                       .end_offset = std::get<2>(remote_file_info),
+			                       .cache_type = "on-disk",
+			                   });
+		                   });
 	}
 
 	return cache_entries_info;
@@ -361,7 +382,9 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 				if (cache_entry != nullptr && !ValidateCacheEntry(cache_entry.get(), version_tag.get())) {
 					in_mem_cache_blocks->Delete(block_key);
 					cache_entry = nullptr;
-					local_filesystem->TryRemoveFile(cache_destination.cache_filepath);
+					FileSystem &cache_fs = GetFileSystemForCacheDirectory(
+					    config.on_disk_cache_directories[cache_destination.cache_directory_idx]);
+					cache_fs.TryRemoveFile(cache_destination.cache_filepath);
 				}
 				if (cache_entry != nullptr) {
 					if (profile_collector) {
@@ -389,11 +412,13 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 				file_open_flags |= FileOpenFlags::FILE_FLAGS_DIRECT_IO;
 			}
 
-			auto file_handle = local_filesystem->OpenFile(cache_destination.cache_filepath, file_open_flags);
+			FileSystem &cache_fs =
+			    GetFileSystemForCacheDirectory(config.on_disk_cache_directories[cache_destination.cache_directory_idx]);
+			auto file_handle = cache_fs.OpenFile(cache_destination.cache_filepath, file_open_flags);
 
 			// Check cache validity and clear if necessary.
 			if (file_handle != nullptr && !ValidateCacheFile(cache_destination.cache_filepath, version_tag.get())) {
-				local_filesystem->TryRemoveFile(cache_destination.cache_filepath);
+				cache_fs.TryRemoveFile(cache_destination.cache_filepath);
 				file_handle = nullptr;
 			}
 
@@ -405,9 +430,9 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 				DUCKDB_LOG_READ_CACHE_HIT((handle));
 				if (profile_collector) {
 					const auto latency_guard = profile_collector->RecordOperationStart(IoOperation::kDiskCacheRead);
-					local_filesystem->Read(*file_handle, addr, cache_read_chunk.chunk_size, /*location=*/0);
+					cache_fs.Read(*file_handle, addr, cache_read_chunk.chunk_size, /*location=*/0);
 				} else {
-					local_filesystem->Read(*file_handle, addr, cache_read_chunk.chunk_size, /*location=*/0);
+					cache_fs.Read(*file_handle, addr, cache_read_chunk.chunk_size, /*location=*/0);
 				}
 				cache_read_chunk.CopyBufferToRequestedMemory(content);
 
@@ -477,9 +502,10 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 void DiskCacheReader::ClearCache() {
 	const auto &config = GetInstanceConfig(instance_state);
 	for (const auto &cur_cache_dir : config.on_disk_cache_directories) {
-		local_filesystem->RemoveDirectory(cur_cache_dir);
+		FileSystem &cache_fs = GetFileSystemForCacheDirectory(cur_cache_dir);
+		cache_fs.RemoveDirectory(cur_cache_dir);
 		// Create an empty directory, otherwise later read access errors.
-		local_filesystem->CreateDirectory(cur_cache_dir);
+		cache_fs.CreateDirectory(cur_cache_dir);
 	}
 	if (in_mem_cache_blocks != nullptr) {
 		in_mem_cache_blocks->Clear();
@@ -490,10 +516,11 @@ void DiskCacheReader::ClearCache(const string &fname) {
 	const string cache_file_prefix = GetLocalCacheFilePrefix(fname);
 	const auto &config = GetInstanceConfig(instance_state);
 	for (const auto &cur_cache_dir : config.on_disk_cache_directories) {
-		local_filesystem->ListFiles(cur_cache_dir, [&](const string &cur_file, bool /*unused*/) {
+		FileSystem &cache_fs = GetFileSystemForCacheDirectory(cur_cache_dir);
+		cache_fs.ListFiles(cur_cache_dir, [&](const string &cur_file, bool /*unused*/) {
 			if (StringUtil::StartsWith(cur_file, cache_file_prefix)) {
 				const string filepath = StringUtil::Format("%s/%s", cur_cache_dir, cur_file);
-				local_filesystem->RemoveFile(filepath);
+				cache_fs.RemoveFile(filepath);
 			}
 		});
 	}

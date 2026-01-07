@@ -15,6 +15,7 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 project(${TARGET_NAME})
 include_directories(src/utils/include)
 include_directories(src/include)
+include_directories(src/nvmefs/include)
 include_directories(duckdb-httpfs/src/include)
 include_directories(duckdb/third_party/httplib)
 
@@ -46,6 +47,11 @@ set(EXTENSION_SOURCES
     src/utils/test_utils.cpp
     src/utils/thread_pool.cpp
     src/utils/thread_utils.cpp
+    src/nvmefs/device.cpp
+    src/nvmefs/nvme_device.cpp
+    src/nvmefs/nvmefs.cpp
+    src/nvmefs/nvmefs_temporary_block_manager.cpp
+    src/nvmefs/temporary_file_metadata_manager.cpp
     duckdb-httpfs/src/create_secret_functions.cpp
     duckdb-httpfs/src/crypto.cpp
     duckdb-httpfs/src/hash_functions.cpp
@@ -95,11 +101,28 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 
+# Try to find xnvme via pkg-config
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+  pkg_check_modules(XNVME xnvme)
+  if(XNVME_FOUND)
+    include_directories(${XNVME_INCLUDE_DIRS})
+    link_directories(${XNVME_LIBRARY_DIRS})
+    message(STATUS "Found xnvme: ${XNVME_LIBRARIES}")
+  else()
+    message(WARNING "xnvme not found, nvmefs:// cache support will not be available")
+    set(XNVME_LIBRARIES "")
+  endif()
+else()
+  message(WARNING "pkg-config not found, xnvme detection may fail")
+  set(XNVME_LIBRARIES "")
+endif()
+
 include_directories(${OPENSSL_INCLUDE_DIR})
 target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto
-                      CURL::libcurl)
+                      CURL::libcurl ${XNVME_LDFLAGS})
 target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto
-                      CURL::libcurl)
+                      CURL::libcurl ${XNVME_LDFLAGS})
 
 install(
   TARGETS ${EXTENSION_NAME}
@@ -198,6 +221,10 @@ target_link_libraries(test_multi_duckdb_instance ${EXTENSION_NAME})
 add_executable(test_scoped_directory
                unit/test_scoped_directory.cpp)
 target_link_libraries(test_scoped_directory ${EXTENSION_NAME})
+
+add_executable(test_nvme_cache
+               unit/test_nvme_cache.cpp)
+target_link_libraries(test_nvme_cache ${EXTENSION_NAME})
 
 # Benchmark
 add_executable(read_s3_object benchmark/read_s3_object.cpp)

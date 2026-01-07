@@ -14,6 +14,7 @@
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/opener_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/virtual_file_system.hpp"
 #include "duckdb/main/extension_manager.hpp"
 #include "duckdb/main/setting_info.hpp"
 #include "duckdb/storage/external_file_cache.hpp"
@@ -23,6 +24,7 @@
 #include "hffs.hpp"
 #include "httpfs_extension.hpp"
 #include "s3fs.hpp"
+#include "nvmefs.hpp"
 
 #include <algorithm>
 
@@ -52,6 +54,32 @@ connection_t GetConnectionId(ExpressionState &state) {
 	return client_context.GetConnectionId();
 }
 
+// Ensure NvmeFileSystem is registered with the VFS (lazy registration)
+void EnsureNvmeFileSystemRegistered(DatabaseInstance &instance, CacheHttpfsInstanceState &inst_state) {
+	if (inst_state.config.nvme_device_path.empty()) {
+		throw InvalidInputException("Cannot use nvmefs:// paths without setting cache_httpfs_nvme_device_path");
+	}
+	
+	// Check if already registered using a flag in instance state
+	if (inst_state.nvme_filesystem_registered) {
+		return;
+	}
+	
+	auto &opener_fs = instance.GetFileSystem().Cast<OpenerFileSystem>();
+	auto &vfs = opener_fs.GetFileSystem().Cast<VirtualFileSystem>();
+	
+	// Register NvmeFileSystem
+	auto nvme_fs = make_uniq<NvmeFileSystem>(
+		inst_state.config.nvme_device_path,
+		inst_state.config.nvme_backend,
+		inst_state.config.nvme_async,
+		inst_state.config.nvme_max_threads
+	);
+	
+	vfs.RegisterSubSystem(std::move(nvme_fs));
+	inst_state.nvme_filesystem_registered = true;
+}
+
 // Clear both in-memory and on-disk data block cache.
 void ClearAllCache(const DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &instance = GetDatabaseInstance(state);
@@ -60,8 +88,18 @@ void ClearAllCache(const DataChunk &args, ExpressionState &state, Vector &result
 	// Special handle local disk cache clear, since it's possible disk cache reader hasn't been initialized.
 	auto local_filesystem = LocalFileSystem::CreateLocal();
 	for (const auto &cur_cache_dir : inst_state.config.on_disk_cache_directories) {
-		local_filesystem->RemoveDirectory(cur_cache_dir);
-		local_filesystem->CreateDirectory(cur_cache_dir);
+		// Use VirtualFileSystem for nvmefs:// paths, LocalFileSystem for regular paths
+		if (StringUtil::StartsWith(cur_cache_dir, NVMEFS_PATH_PREFIX)) {
+			// Ensure NvmeFileSystem is registered before using nvmefs:// paths
+			EnsureNvmeFileSystemRegistered(instance, inst_state);
+			auto &opener_fs = instance.GetFileSystem().Cast<OpenerFileSystem>();
+			auto &vfs = opener_fs.GetFileSystem();
+			vfs.RemoveDirectory(cur_cache_dir);
+			vfs.CreateDirectory(cur_cache_dir);
+		} else {
+			local_filesystem->RemoveDirectory(cur_cache_dir);
+			local_filesystem->CreateDirectory(cur_cache_dir);
+		}
 	}
 
 	// Clear data block cache for all initialized cache readers.
@@ -237,6 +275,31 @@ void UpdateCacheType(ClientContext &context, SetScope scope, Value &parameter) {
 	inst_state.config.cache_type = std::move(cache_type_str);
 }
 
+void UpdateNvmeDevicePath(ClientContext &context, SetScope scope, Value &parameter) {
+	auto &inst_state = GetInstanceStateOrThrow(context);
+	const string device_path = parameter.GetValue<string>();
+	inst_state.config.nvme_device_path = device_path;
+	// NvmeFileSystem will be registered lazily when needed (on first nvmefs:// access)
+}
+
+void UpdateNvmeBackend(ClientContext &context, SetScope scope, Value &parameter) {
+	auto &inst_state = GetInstanceStateOrThrow(context);
+	const string backend = parameter.GetValue<string>();
+	inst_state.config.nvme_backend = backend;
+}
+
+void UpdateNvmeAsync(ClientContext &context, SetScope scope, Value &parameter) {
+	auto &inst_state = GetInstanceStateOrThrow(context);
+	const bool async = parameter.GetValue<bool>();
+	inst_state.config.nvme_async = async;
+}
+
+void UpdateNvmeMaxThreads(ClientContext &context, SetScope scope, Value &parameter) {
+	auto &inst_state = GetInstanceStateOrThrow(context);
+	const idx_t max_threads = parameter.GetValue<idx_t>();
+	inst_state.config.nvme_max_threads = max_threads;
+}
+
 void UpdateCacheBlockSize(ClientContext &context, SetScope scope, Value &parameter) {
 	auto &inst_state = GetInstanceStateOrThrow(context);
 	const auto cache_block_size = parameter.GetValue<uint64_t>();
@@ -280,6 +343,10 @@ void UpdateCacheDirectoriesImpl(CacheHttpfsInstanceState &inst_state, vector<str
 
 	auto local_fs = LocalFileSystem::CreateLocal();
 	for (const auto &dir : directories) {
+		// Skip directory creation for nvmefs:// paths - directories implicitly exist in NvmeFileSystem
+		if (StringUtil::StartsWith(dir, NVMEFS_PATH_PREFIX)) {
+			continue;
+		}
 		local_fs->CreateDirectory(dir);
 	}
 	inst_state.config.on_disk_cache_directories = std::move(directories);
@@ -460,6 +527,7 @@ void LoadInternal(ExtensionLoader &loader) {
 
 	// Create per-instance state for this extension
 	auto state = make_shared_ptr<CacheHttpfsInstanceState>();
+	state->db_instance = &instance;  // Store weak reference for VFS access
 	SetInstanceState(instance, state);
 
 	// Ensure cache directory exists
@@ -737,6 +805,59 @@ void LoadInternal(ExtensionLoader &loader) {
 
 	// Register cache access metrics.
 	loader.RegisterFunction(GetCacheAccessInfoQueryFunc());
+
+	// NVMe Configuration
+	auto &dbconfig = instance.config;
+	
+	dbconfig.AddExtensionOption(
+		"cache_httpfs_nvme_device_path",
+		"Path to NVMe device for cache storage (e.g., /dev/nvme0n1). When set, cache directories using nvmefs:// scheme will use xNVMe for I/O.",
+		LogicalType {LogicalTypeId::VARCHAR},
+		Value(""),
+		UpdateNvmeDevicePath);
+	
+	dbconfig.AddExtensionOption(
+		"cache_httpfs_nvme_backend",
+		"xNVMe backend to use (nvme, io_uring_cmd, libaio, spdk, etc.). Defaults to 'nvme'.",
+		LogicalType {LogicalTypeId::VARCHAR},
+		Value("nvme"),
+		UpdateNvmeBackend);
+	
+	dbconfig.AddExtensionOption(
+		"cache_httpfs_nvme_async",
+		"Enable asynchronous I/O for NVMe device. Defaults to false (synchronous).",
+		LogicalType {LogicalTypeId::BOOLEAN},
+		Value(false),
+		UpdateNvmeAsync);
+	
+	dbconfig.AddExtensionOption(
+		"cache_httpfs_nvme_max_threads",
+		"Maximum number of threads for NVMe async I/O. Defaults to system thread count.",
+		LogicalType {LogicalTypeId::UBIGINT},
+		Value::UBIGINT(8),
+		UpdateNvmeMaxThreads);
+	
+	// Register NvmeFileSystem if device path is configured
+	auto &inst_state = GetInstanceStateOrThrow(instance);
+	if (!inst_state.config.nvme_device_path.empty()) {
+		try {
+			auto &opener_filesystem = instance.GetFileSystem().Cast<OpenerFileSystem>();
+			auto &vfs = opener_filesystem.GetFileSystem();
+			
+			auto nvme_fs = make_uniq<NvmeFileSystem>(
+				inst_state.config.nvme_device_path,
+				inst_state.config.nvme_backend,
+				inst_state.config.nvme_async,
+				inst_state.config.nvme_max_threads
+			);
+			
+			vfs.RegisterSubSystem(std::move(nvme_fs));
+			DUCKDB_LOG_DEBUG(instance, "Registered NvmeFileSystem for nvmefs:// paths");
+		} catch (std::exception &e) {
+			// Log warning but don't fail extension load
+			DUCKDB_LOG_DEBUG(instance, StringUtil::Format("Failed to register NvmeFileSystem: %s", e.what()));
+		}
+	}
 
 	// Create default cache directory.
 	LocalFileSystem::CreateLocal()->CreateDirectory(*DEFAULT_ON_DISK_CACHE_DIRECTORY);

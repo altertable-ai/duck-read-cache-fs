@@ -134,6 +134,12 @@ struct InstanceConfig {
 
 	// Cache validation config
 	bool enable_cache_validation = DEFAULT_ENABLE_CACHE_VALIDATION;
+	
+	// NVMe configuration
+	string nvme_device_path = "";
+	string nvme_backend = "nvme";
+	bool nvme_async = false;
+	idx_t nvme_max_threads = 8;
 };
 
 //===--------------------------------------------------------------------===//
@@ -149,6 +155,12 @@ struct CacheHttpfsInstanceState : public ObjectCacheEntry {
 	InstanceCacheReaderManager cache_reader_manager;
 	InstanceProfileCollectorManager profile_collector_manager;
 	CacheExclusionManager exclusion_manager;
+	
+	// Store weak reference to DatabaseInstance for VFS access
+	DatabaseInstance *db_instance = nullptr;
+	
+	// Track if NvmeFileSystem has been registered (for lazy registration)
+	bool nvme_filesystem_registered = false;
 
 	CacheHttpfsInstanceState() = default;
 

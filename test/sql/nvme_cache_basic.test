@@ -1,0 +1,64 @@
+# name: test/sql/nvme_cache_basic.test
+# description: Test nvmefs:// cache directory with actual NVMe operations
+# group: [sql]
+# Note: This test requires Linux with a real NVMe device. On macOS or without NVMe, this test will be skipped.
+
+require cache_httpfs
+
+# Skip test if NVME_DEVICE_PATH environment variable is not set
+# On CI with NVMe hardware, set NVME_DEVICE_PATH=/dev/nvme0n1 (or appropriate device)
+require-env NVME_DEVICE_PATH
+
+# Set backend and async BEFORE device path (NvmeFileSystem is registered on first nvmefs:// access)
+statement ok
+SET cache_httpfs_nvme_backend = 'io_uring_cmd';
+
+statement ok
+SET cache_httpfs_nvme_async = false;
+
+statement ok
+SET cache_httpfs_nvme_device_path = '${NVME_DEVICE_PATH}';
+
+statement ok
+SET cache_httpfs_cache_directory = 'nvmefs:///tmp/nvme_test_cache';
+
+statement ok
+SET cache_httpfs_type = 'on_disk';
+
+# Use a large cache block size so the test file fits in one block
+statement ok
+SET cache_httpfs_cache_block_size = 1000000;
+
+# Clear any existing cache
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+# Verify cache is empty
+query IIIII
+SELECT * FROM cache_httpfs_cache_status_query();
+----
+
+# Test uncached read from HTTP source - this will trigger NVMe cache write
+query I
+SELECT COUNT(*) FROM read_csv_auto('https://raw.githubusercontent.com/dentiny/duck-read-cache-fs/refs/heads/main/test/data/stock-exchanges.csv');
+----
+251
+
+# Test cached read - this will read from NVMe cache
+query IIIIII
+SELECT * FROM read_csv_auto('https://raw.githubusercontent.com/dentiny/duck-read-cache-fs/refs/heads/main/test/data/stock-exchanges.csv') LIMIT 3;
+----
+1	Africa	Lesotho	HYBSE	NULL	2019-03-25
+2	Asia	Kazakhstan	Astana International Financial Centre	AIXK	2018-11-18
+3	Africa	South Africa	ZAR X	ZARX	2018-11-18
+
+# Verify cache status shows cached file
+query I
+SELECT COUNT(*) FROM cache_httpfs_cache_status_query();
+----
+1
+
+# Clear cache after test
+statement ok
+SELECT cache_httpfs_clear_cache();
+
