@@ -12,6 +12,7 @@
 #include "disk_cache_util.hpp"
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "lru_data_cache_manager.hpp"
 #include "utils/include/chunk_utils.hpp"
 #include "utils/include/filesystem_utils.hpp"
 #include "utils/include/resize_uninitialized.hpp"
@@ -24,10 +25,8 @@
 
 namespace duckdb {
 
-DiskCacheReader::DiskCacheReader(weak_ptr<CacheHttpfsInstanceState> instance_state_p,
-                                 BaseProfileCollector &profile_collector_p)
-    : BaseCacheReader(profile_collector_p, *ON_DISK_CACHE_READER_NAME),
-      local_filesystem(LocalFileSystem::CreateLocal()), instance_state(std::move(instance_state_p)) {
+DiskCacheReader::DiskCacheReader(weak_ptr<CacheHttpfsInstanceState> instance_state_p)
+    : BaseCacheReader(std::move(instance_state_p)), local_filesystem(LocalFileSystem::CreateLocal()) {
 }
 
 string DiskCacheReader::EvictCacheBlockLru() {
@@ -61,8 +60,8 @@ vector<DataCacheEntryInfo> DiskCacheReader::GetCacheEntriesInfo() const {
 	vector<DataCacheEntryInfo> cache_entries_info;
 
 	// Fill in in-memory cache blocks for on disk cache reader.
-	if (in_mem_cache_blocks != nullptr) {
-		auto keys = in_mem_cache_blocks->Keys();
+	if (in_mem_cache_manager != nullptr) {
+		auto keys = in_mem_cache_manager->Keys();
 		cache_entries_info.reserve(keys.size());
 		for (auto &cur_key : keys) {
 			cache_entries_info.emplace_back(DataCacheEntryInfo {
@@ -100,6 +99,10 @@ void DiskCacheReader::ProcessCacheReadChunk(FileHandle &handle, const InstanceCo
                                             CacheReadChunk cache_read_chunk) {
 	SetThreadName("RdCachRdThd");
 
+	auto &cache_handle = handle.Cast<CacheFileSystemHandle>();
+	auto state = instance_state.lock();
+	auto &collector = GetProfileCollectorOrThrow(state, cache_handle.GetConnectionId());
+
 	// Resolve the on-disk cache path once up-front; use the resolved filepath as the unified key for both in-memory and
 	// on-disk cache.
 	auto cache_file =
@@ -112,15 +115,16 @@ void DiskCacheReader::ProcessCacheReadChunk(FileHandle &handle, const InstanceCo
 	                                 cache_read_chunk.chunk_size};
 
 	// Attempt in-memory cache first, so potentially we don't need to access disk storage.
-	if (in_mem_cache_blocks != nullptr) {
-		auto cache_entry = in_mem_cache_blocks->Get(block_key);
+	if (in_mem_cache_manager != nullptr) {
+		auto cache_entry = in_mem_cache_manager->Get(block_key);
 		if (cache_entry != nullptr && !ValidateCacheEntry(cache_entry.get(), version_tag)) {
-			in_mem_cache_blocks->Delete(block_key);
+			in_mem_cache_manager->Delete(block_key);
 			cache_entry = nullptr;
 			local_filesystem->TryRemoveFile(cache_dest.dest_local_filepath);
 		}
 		if (cache_entry != nullptr) {
-			GetProfileCollector().RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit);
+			collector.RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit,
+			                            cache_read_chunk.bytes_to_copy);
 			DUCKDB_LOG_READ_CACHE_HIT((handle));
 			cache_read_chunk.CopyBufferToRequestedMemory(cache_entry->data);
 			return;
@@ -132,28 +136,29 @@ void DiskCacheReader::ProcessCacheReadChunk(FileHandle &handle, const InstanceCo
 	//
 	// TODO(hjiang): With in-memory cache block involved, we could place disk write to background thread.
 	{
-		const auto latency_guard = GetProfileCollector().RecordOperationStart(IoOperation::kDiskCacheRead);
-		auto read_result =
-		    DiskCacheUtil::ReadLocalCacheFile(cache_dest.dest_local_filepath, cache_read_chunk.chunk_size, version_tag);
+		const auto latency_guard = collector.RecordOperationStart(IoOperation::kDiskCacheRead);
+		auto read_result = DiskCacheUtil::ReadLocalCacheFile(cache_dest.dest_local_filepath,
+		                                                     cache_read_chunk.chunk_size, version_tag);
 		if (read_result.cache_hit) {
-			GetProfileCollector().RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit);
+			collector.RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit,
+			                            cache_read_chunk.bytes_to_copy);
 			DUCKDB_LOG_READ_CACHE_HIT((handle));
 			cache_read_chunk.CopyBufferToRequestedMemory(read_result.content);
 
 			// Update in-memory cache if applicable.
-			if (in_mem_cache_blocks != nullptr) {
+			if (in_mem_cache_manager != nullptr) {
 				InMemCacheEntry new_cache_entry {
 				    .data = std::move(read_result.content),
 				    .version_tag = version_tag,
 				};
-				in_mem_cache_blocks->Put(block_key, make_shared_ptr<InMemCacheEntry>(std::move(new_cache_entry)));
+				in_mem_cache_manager->Put(block_key, make_shared_ptr<InMemCacheEntry>(std::move(new_cache_entry)));
 			}
 			return;
 		}
 	}
 
 	// We suffer a cache loss, fallback to remote access then local filesystem write.
-	GetProfileCollector().RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheMiss);
+	collector.RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheMiss, cache_read_chunk.bytes_to_copy);
 	DUCKDB_LOG_READ_CACHE_MISS((handle));
 	auto content = CreateResizeUninitializedString(cache_read_chunk.chunk_size);
 	void *addr = const_cast<char *>(content.data());
@@ -161,7 +166,7 @@ void DiskCacheReader::ProcessCacheReadChunk(FileHandle &handle, const InstanceCo
 	auto *internal_filesystem = disk_cache_handle.GetInternalFileSystem();
 
 	{
-		const auto latency_guard = GetProfileCollector().RecordOperationStart(IoOperation::kRead);
+		const auto latency_guard = collector.RecordOperationStart(IoOperation::kRead);
 		internal_filesystem->Read(*disk_cache_handle.internal_file_handle, addr, cache_read_chunk.chunk_size,
 		                          cache_read_chunk.aligned_start_offset);
 	}
@@ -176,12 +181,12 @@ void DiskCacheReader::ProcessCacheReadChunk(FileHandle &handle, const InstanceCo
 		                                   [this]() { return EvictCacheBlockLru(); });
 
 		// Update in-memory cache if applicable.
-		if (in_mem_cache_blocks != nullptr) {
+		if (in_mem_cache_manager != nullptr) {
 			InMemCacheEntry new_cache_entry {
 			    .data = std::move(content),
 			    .version_tag = version_tag,
 			};
-			in_mem_cache_blocks->Put(block_key, make_shared_ptr<InMemCacheEntry>(std::move(new_cache_entry)));
+			in_mem_cache_manager->Put(block_key, make_shared_ptr<InMemCacheEntry>(std::move(new_cache_entry)));
 		}
 	} catch (...) {
 	}
@@ -197,8 +202,9 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 	const auto &config = instance_state_locked->config;
 	std::call_once(cache_init_flag, [this, &config]() {
 		if (config.enable_disk_reader_mem_cache) {
-			in_mem_cache_blocks = make_uniq<InMemCache>(config.disk_reader_max_mem_cache_timeout_millisec,
-			                                            config.disk_reader_max_mem_cache_timeout_millisec);
+			in_mem_cache_manager =
+			    make_uniq<LruDataCacheManager<InMemCacheBlock, InMemCacheEntry, InMemCacheBlockLess>>(
+			        config.disk_reader_max_mem_cache_block_count, config.disk_reader_max_mem_cache_timeout_millisec);
 		}
 	});
 
@@ -290,8 +296,11 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 	}
 
 	// Record "bytes to read" and "bytes to cache".
-	GetProfileCollector().RecordActualCacheRead(/*cache_size=*/total_bytes_to_cache,
-	                                            /*actual_bytes=*/requested_bytes_to_read);
+	auto &cache_handle = handle.Cast<CacheFileSystemHandle>();
+	auto state_for_profile = instance_state.lock();
+	auto &collector = GetProfileCollectorOrThrow(state_for_profile, cache_handle.GetConnectionId());
+	collector.RecordActualCacheRead(/*cache_size=*/total_bytes_to_cache,
+	                                /*actual_bytes=*/requested_bytes_to_read);
 }
 
 void DiskCacheReader::ClearCache() {
@@ -302,8 +311,8 @@ void DiskCacheReader::ClearCache() {
 		// Create an empty directory, otherwise later read access errors.
 		local_filesystem->CreateDirectory(cur_cache_dir);
 	}
-	if (in_mem_cache_blocks != nullptr) {
-		in_mem_cache_blocks->Clear();
+	if (in_mem_cache_manager != nullptr) {
+		in_mem_cache_manager->Clear();
 	}
 }
 
@@ -336,10 +345,12 @@ void DiskCacheReader::ClearCache(const string &fname) {
 	}
 
 	// Delete in-memory cache for on-disk cache files.
-	if (in_mem_cache_blocks != nullptr) {
+	if (in_mem_cache_manager != nullptr) {
 		const SanitizedCachePath cache_key {fname};
-		in_mem_cache_blocks->Clear(
-		    [&cache_key](const InMemCacheBlock &block) { return block.fname == cache_key.Path(); });
+		// Start from the first block key for this file (ordered by fname, start_off, blk_size).
+		const InMemCacheBlock start_key {cache_key.Path(), /*start_off=*/0, /*blk_size=*/0};
+		in_mem_cache_manager->Clear(
+		    start_key, [&cache_key](const InMemCacheBlock &block) { return block.fname == cache_key.Path(); });
 	}
 }
 
