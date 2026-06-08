@@ -32,6 +32,7 @@ struct TestCacheConfig {
 	bool enable_glob_cache = true;
 	bool enable_disk_reader_mem_cache = true;
 	bool enable_cache_validation = true;
+	vector<string> cache_validation_directories;
 
 	// Cache sizes
 	idx_t max_metadata_cache_entry = 250;

@@ -68,6 +68,14 @@ TEST_CASE("Test on correct config", "[extension config test]") {
 	// In-memory cache block count.
 	result = con.Query(StringUtil::Format("SET cache_httpfs_max_in_mem_cache_block_count=10"));
 	REQUIRE(!result->HasError());
+
+	// Cache validation directories.
+	result = con.Query("SET cache_httpfs_enable_cache_validation=true");
+	REQUIRE(!result->HasError());
+	result = con.Query("SET cache_httpfs_cache_validation_directories=['s3://bucket/some/path/']");
+	REQUIRE(!result->HasError());
+	result = con.Query("SET cache_httpfs_cache_validation_directories=[]");
+	REQUIRE(!result->HasError());
 }
 
 TEST_CASE_METHOD(SetExtensionConfigFixture, "Test on changing extension config change default cache dir path setting",

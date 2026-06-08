@@ -57,7 +57,8 @@ struct ValidationTestHelper {
 	unique_ptr<CacheFileSystem> cache_fs;
 	VersionTagFileSystem *version_tag_fs_ptr = nullptr; // Non-owning pointer for setting version tag
 
-	ValidationTestHelper(idx_t block_size, bool enable_validation, bool enable_disk_reader_mem_cache = false) {
+	ValidationTestHelper(idx_t block_size, bool enable_validation, bool enable_disk_reader_mem_cache = false,
+	                     vector<string> validation_directories = {}) {
 		instance_state = make_shared_ptr<CacheHttpfsInstanceState>();
 
 		// Configure the instance
@@ -66,6 +67,7 @@ struct ValidationTestHelper {
 		config.cache_block_size = block_size;
 		config.on_disk_cache_directories = {TEST_ON_DISK_CACHE_DIRECTORY};
 		config.enable_cache_validation = enable_validation;
+		config.cache_validation_directories = std::move(validation_directories);
 		config.enable_disk_reader_mem_cache = enable_disk_reader_mem_cache;
 
 		// Ensure cache directories exist
@@ -274,4 +276,100 @@ TEST_CASE_METHOD(DiskCacheValidationFixture, "Test disk cache with validation di
 		                           test_block_size, /*location=*/0);
 		REQUIRE(content == TEST_FILE_CONTENT.substr(0, test_block_size));
 	}
+}
+
+// Testing scenario: cache validation restricted to matching directories should invalidate stale cache.
+TEST_CASE_METHOD(DiskCacheValidationFixture,
+                 "Test disk cache validation with matching validation directory invalidates stale cache",
+                 "[disk cache validation test]") {
+	constexpr uint64_t test_block_size = 10;
+
+	LocalFileSystem::CreateLocal()->RemoveDirectory(TEST_ON_DISK_CACHE_DIRECTORY);
+	ScopedDirectory scoped_cache_dir(TEST_ON_DISK_CACHE_DIRECTORY);
+
+	vector<string> validation_directories = {scoped_dir.GetPath()};
+	ValidationTestHelper helper(test_block_size, /*enable_validation=*/true, /*enable_disk_reader_mem_cache=*/false,
+	                            std::move(validation_directories));
+	const string initial_version_tag = "version-1.0";
+	helper.SetVersionTag(initial_version_tag);
+	auto *cache_filesystem = helper.GetCacheFileSystem();
+
+	// First read: cache the file
+	{
+		auto handle = cache_filesystem->OpenFile(test_filename, FileOpenFlags::FILE_FLAGS_READ);
+		string content(test_block_size, '\0');
+		cache_filesystem->Read(*handle, const_cast<void *>(static_cast<const void *>(content.data())), test_block_size,
+		                       /*location=*/0);
+		REQUIRE(content == TEST_FILE_CONTENT.substr(0, test_block_size));
+	}
+
+	ValidationTestHelper new_helper(test_block_size, /*enable_validation=*/true, /*enable_disk_reader_mem_cache=*/false,
+	                                vector<string> {scoped_dir.GetPath()});
+	const string new_version_tag = "version-2.0";
+	new_helper.SetVersionTag(new_version_tag);
+	auto *new_cache_filesystem = new_helper.GetCacheFileSystem();
+
+	// Second read with different version tag: should invalidate cache and re-fetch
+	{
+		auto handle = new_cache_filesystem->OpenFile(test_filename, FileOpenFlags::FILE_FLAGS_READ);
+		string content(test_block_size, '\0');
+		new_cache_filesystem->Read(*handle, const_cast<void *>(static_cast<const void *>(content.data())),
+		                           test_block_size, /*location=*/0);
+		REQUIRE(content == TEST_FILE_CONTENT.substr(0, test_block_size));
+	}
+
+	auto cache_files = GetSortedFilesUnder(TEST_ON_DISK_CACHE_DIRECTORY);
+	REQUIRE(cache_files.size() == 1);
+	string cache_file_path = StringUtil::Format("%s/%s", TEST_ON_DISK_CACHE_DIRECTORY, cache_files[0]);
+	REQUIRE(GetCacheVersion(cache_file_path) == new_version_tag);
+}
+
+// Testing scenario: cache validation restricted to non-matching directories should keep using cache.
+TEST_CASE_METHOD(DiskCacheValidationFixture,
+                 "Test disk cache validation with non-matching validation directory keeps stale cache",
+                 "[disk cache validation test]") {
+	constexpr uint64_t test_block_size = 10;
+
+	LocalFileSystem::CreateLocal()->RemoveDirectory(TEST_ON_DISK_CACHE_DIRECTORY);
+	ScopedDirectory scoped_cache_dir(TEST_ON_DISK_CACHE_DIRECTORY);
+
+	ValidationTestHelper helper(test_block_size, /*enable_validation=*/true, /*enable_disk_reader_mem_cache=*/false,
+	                            vector<string> {"/tmp/non_matching_validation_directory"});
+	const string initial_version_tag = "version-1.0";
+	helper.SetVersionTag(initial_version_tag);
+	auto *cache_filesystem = helper.GetCacheFileSystem();
+
+	// First read: cache the file
+	{
+		auto handle = cache_filesystem->OpenFile(test_filename, FileOpenFlags::FILE_FLAGS_READ);
+		string content(test_block_size, '\0');
+		cache_filesystem->Read(*handle, const_cast<void *>(static_cast<const void *>(content.data())), test_block_size,
+		                       /*location=*/0);
+		REQUIRE(content == TEST_FILE_CONTENT.substr(0, test_block_size));
+	}
+
+	auto cache_files = GetSortedFilesUnder(TEST_ON_DISK_CACHE_DIRECTORY);
+	REQUIRE(cache_files.size() == 1);
+	string cache_file_path = StringUtil::Format("%s/%s", TEST_ON_DISK_CACHE_DIRECTORY, cache_files[0]);
+	REQUIRE(GetCacheVersion(cache_file_path).empty());
+
+	ValidationTestHelper new_helper(test_block_size, /*enable_validation=*/true, /*enable_disk_reader_mem_cache=*/false,
+	                                vector<string> {"/tmp/non_matching_validation_directory"});
+	const string new_version_tag = "version-2.0";
+	new_helper.SetVersionTag(new_version_tag);
+	auto *new_cache_filesystem = new_helper.GetCacheFileSystem();
+
+	// Second read with different version tag: validation is skipped, so cache should be reused
+	{
+		auto handle = new_cache_filesystem->OpenFile(test_filename, FileOpenFlags::FILE_FLAGS_READ);
+		string content(test_block_size, '\0');
+		new_cache_filesystem->Read(*handle, const_cast<void *>(static_cast<const void *>(content.data())),
+		                           test_block_size, /*location=*/0);
+		REQUIRE(content == TEST_FILE_CONTENT.substr(0, test_block_size));
+	}
+
+	cache_files = GetSortedFilesUnder(TEST_ON_DISK_CACHE_DIRECTORY);
+	REQUIRE(cache_files.size() == 1);
+	cache_file_path = StringUtil::Format("%s/%s", TEST_ON_DISK_CACHE_DIRECTORY, cache_files[0]);
+	REQUIRE(GetCacheVersion(cache_file_path).empty());
 }

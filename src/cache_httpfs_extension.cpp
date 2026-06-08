@@ -17,6 +17,7 @@
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/opener_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/main/extension_callback_manager.hpp"
 #include "duckdb/main/extension_manager.hpp"
 #include "duckdb/main/setting_info.hpp"
@@ -307,6 +308,23 @@ void UpdateMaxFanoutSubrequest(ClientContext &context, SetScope scope, Value &pa
 void UpdateEnableCacheValidation(ClientContext &context, SetScope scope, Value &parameter) {
 	auto &inst_state = GetInstanceStateOrThrow(context);
 	inst_state.config.enable_cache_validation = parameter.GetValue<bool>();
+}
+
+void UpdateCacheValidationDirectories(ClientContext &context, SetScope scope, Value &parameter) {
+	auto &inst_state = GetInstanceStateOrThrow(context);
+	vector<string> directories;
+	for (auto &val : ListValue::GetChildren(parameter)) {
+		auto directory = val.GetValue<string>();
+		if (directory.empty()) {
+			throw InvalidInputException("cache_httpfs_cache_validation_directories cannot contain empty entries");
+		}
+		while (directory.size() > 1 && directory.back() == '/') {
+			directory.pop_back();
+		}
+		directories.emplace_back(std::move(directory));
+	}
+	std::sort(directories.begin(), directories.end());
+	inst_state.config.cache_validation_directories = std::move(directories);
 }
 
 void UpdateClearCacheOnWrite(ClientContext &context, SetScope scope, Value &parameter) {
@@ -650,6 +668,12 @@ void LoadInternal(ExtensionLoader &loader) {
 	                          "When enabled, cache entries are validated against the current file version tag and "
 	                          "modification timestamp to ensure cache consistency. By default disabled.",
 	                          LogicalTypeId::BOOLEAN, DEFAULT_ENABLE_CACHE_VALIDATION, UpdateEnableCacheValidation);
+	config.AddExtensionOption(
+	    "cache_httpfs_cache_validation_directories",
+	    "When cache validation is enabled, restrict validation to source paths under these directories. "
+	    "When empty, validation applies to all cached paths. Caching itself is unaffected.",
+	    LogicalType::LIST(LogicalType::VARCHAR), Value::LIST(LogicalType::VARCHAR, {}),
+	    UpdateCacheValidationDirectories);
 
 	// Cache invalidation on write config.
 	config.AddExtensionOption(

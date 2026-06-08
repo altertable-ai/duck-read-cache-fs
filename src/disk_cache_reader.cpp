@@ -216,7 +216,9 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 	auto parallel_executor =
 	    CreateParallelExecutor(instance_state_locked->db_instance, config.parallel_read_mode, task_count);
 	// Get file-level metadata once before processing chunks.
-	string version_tag = config.enable_cache_validation ? handle.Cast<CacheFileSystemHandle>().GetVersionTag() : "";
+	string version_tag = config.ShouldValidateCacheForPath(handle.GetPath())
+	                         ? handle.Cast<CacheFileSystemHandle>().GetVersionTag()
+	                         : "";
 
 	// To improve IO performance, we split requested bytes (after alignment) into multiple chunks and fetch them in
 	// parallel.

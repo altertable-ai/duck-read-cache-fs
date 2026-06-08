@@ -46,6 +46,16 @@ Value GetCacheExclusionRegexes(CacheHttpfsInstanceState &state) {
 	return Value::LIST(LogicalType {LogicalTypeId::VARCHAR}, std::move(exclusion_regex_values));
 }
 
+// Get cache validation directories in duckdb [`Value`].
+Value GetCacheValidationDirectories(const InstanceConfig &config) {
+	vector<Value> validation_directories;
+	validation_directories.reserve(config.cache_validation_directories.size());
+	for (const auto &directory : config.cache_validation_directories) {
+		validation_directories.emplace_back(Value {directory});
+	}
+	return Value::LIST(LogicalType {LogicalTypeId::VARCHAR}, std::move(validation_directories));
+}
+
 void DataCacheConfigQueryFuncBindImpl(const InstanceConfig &config, vector<LogicalType> &return_types,
                                       vector<string> &names) {
 	return_types.emplace_back(LogicalType {LogicalTypeId::VARCHAR});
@@ -382,6 +392,10 @@ unique_ptr<FunctionData> CacheConfigQueryFuncBind(ClientContext &context, TableF
 	return_types.emplace_back(LogicalType::LIST(LogicalType {LogicalTypeId::VARCHAR}));
 	names.emplace_back("cache exclusion regexes");
 
+	// Cache validation directories.
+	return_types.emplace_back(LogicalType::LIST(LogicalType {LogicalTypeId::VARCHAR}));
+	names.emplace_back("cache validation directories");
+
 	return nullptr;
 }
 
@@ -417,6 +431,9 @@ void CacheConfigQueryTableFunc(ClientContext &context, TableFunctionInput &data_
 	// Cache exclusion regex.
 	auto &state = GetInstanceStateOrThrow(*context.db);
 	output.SetValue(col++, /*index=*/0, GetCacheExclusionRegexes(state));
+
+	// Cache validation directories.
+	output.SetValue(col++, /*index=*/0, GetCacheValidationDirectories(config));
 
 	output.SetCardinality(/*count_p=*/1);
 }

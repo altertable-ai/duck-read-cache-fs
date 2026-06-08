@@ -49,6 +49,7 @@ struct CustomFsHelper {
 		inst_config.cache_type = config.cache_type;
 		inst_config.cache_block_size = config.cache_block_size;
 		inst_config.enable_cache_validation = config.enable_cache_validation;
+		inst_config.cache_validation_directories = config.cache_validation_directories;
 		inst_config.enable_disk_reader_mem_cache = config.enable_disk_reader_mem_cache;
 
 		instance_state->db_instance = db.instance.get();
@@ -79,6 +80,7 @@ struct MockFsHelper {
 		inst_config.cache_type = config.cache_type;
 		inst_config.cache_block_size = config.cache_block_size;
 		inst_config.enable_cache_validation = config.enable_cache_validation;
+		inst_config.cache_validation_directories = config.cache_validation_directories;
 		inst_config.enable_disk_reader_mem_cache = config.enable_disk_reader_mem_cache;
 
 		// Register state with instance. `db_instance` must be wired up before any reader is initialized so that
@@ -256,5 +258,94 @@ TEST_CASE_METHOD(InMemoryCacheFilesystemFixture, "Test cache validation with ver
 		REQUIRE(read_operations.size() == 1);
 		REQUIRE(read_operations[0].start_offset == 0);
 		REQUIRE(read_operations[0].bytes_to_read == TEST_FILE_SIZE);
+	}
+}
+
+TEST_CASE_METHOD(InMemoryCacheFilesystemFixture,
+                 "Test cache validation restricted to matching validation directory invalidates stale cache",
+                 "[in-memory cache filesystem test]") {
+	TestCacheConfig config;
+	config.cache_type = "in_mem";
+	config.cache_block_size = TEST_FILE_SIZE;
+	config.enable_cache_validation = true;
+	config.cache_validation_directories = {scoped_dir.GetPath()};
+
+	auto close_callback = []() {
+	};
+	auto dtor_callback = []() {
+	};
+	auto mock_filesystem = make_uniq<MockFileSystem>(std::move(close_callback), std::move(dtor_callback));
+	mock_filesystem->SetFileSize(TEST_FILE_SIZE);
+	mock_filesystem->SetVersionTag("v1");
+	mock_filesystem->SetLastModificationTime(timestamp_t {1000000});
+
+	MockFsHelper helper(std::move(mock_filesystem), config);
+	auto *mock_filesystem_ptr = helper.mock_fs_ptr;
+	auto *in_mem_cache_fs = helper.GetCacheFileSystem();
+
+	{
+		auto handle = in_mem_cache_fs->OpenFile(test_filename, FileOpenFlags::FILE_FLAGS_READ);
+		string content(TEST_FILE_SIZE, '\0');
+		in_mem_cache_fs->Read(*handle, const_cast<void *>(static_cast<const void *>(content.data())), TEST_FILE_SIZE,
+		                      /*location=*/0);
+		REQUIRE(content == std::string(TEST_FILE_SIZE, 'a'));
+		REQUIRE(mock_filesystem_ptr->GetVersionTagInvocation() == 1);
+	}
+
+	mock_filesystem_ptr->SetVersionTag("v2");
+	mock_filesystem_ptr->ClearReadOperations();
+	{
+		auto handle = in_mem_cache_fs->OpenFile(test_filename, FileOpenFlags::FILE_FLAGS_READ);
+		string content(TEST_FILE_SIZE, '\0');
+		in_mem_cache_fs->Read(*handle, const_cast<void *>(static_cast<const void *>(content.data())), TEST_FILE_SIZE,
+		                      /*location=*/0);
+		REQUIRE(content == std::string(TEST_FILE_SIZE, 'a'));
+		REQUIRE(mock_filesystem_ptr->GetVersionTagInvocation() == 2);
+		auto read_operations = mock_filesystem_ptr->GetSortedReadOperations();
+		REQUIRE(read_operations.size() == 1);
+	}
+}
+
+TEST_CASE_METHOD(InMemoryCacheFilesystemFixture,
+                 "Test cache validation restricted to non-matching validation directory keeps stale cache",
+                 "[in-memory cache filesystem test]") {
+	TestCacheConfig config;
+	config.cache_type = "in_mem";
+	config.cache_block_size = TEST_FILE_SIZE;
+	config.enable_cache_validation = true;
+	config.cache_validation_directories = {"/tmp/non_matching_validation_directory"};
+
+	auto close_callback = []() {
+	};
+	auto dtor_callback = []() {
+	};
+	auto mock_filesystem = make_uniq<MockFileSystem>(std::move(close_callback), std::move(dtor_callback));
+	mock_filesystem->SetFileSize(TEST_FILE_SIZE);
+	mock_filesystem->SetVersionTag("v1");
+	mock_filesystem->SetLastModificationTime(timestamp_t {1000000});
+
+	MockFsHelper helper(std::move(mock_filesystem), config);
+	auto *mock_filesystem_ptr = helper.mock_fs_ptr;
+	auto *in_mem_cache_fs = helper.GetCacheFileSystem();
+
+	{
+		auto handle = in_mem_cache_fs->OpenFile(test_filename, FileOpenFlags::FILE_FLAGS_READ);
+		string content(TEST_FILE_SIZE, '\0');
+		in_mem_cache_fs->Read(*handle, const_cast<void *>(static_cast<const void *>(content.data())), TEST_FILE_SIZE,
+		                      /*location=*/0);
+		REQUIRE(content == std::string(TEST_FILE_SIZE, 'a'));
+		REQUIRE(mock_filesystem_ptr->GetVersionTagInvocation() == 0);
+	}
+
+	mock_filesystem_ptr->SetVersionTag("v2");
+	mock_filesystem_ptr->ClearReadOperations();
+	{
+		auto handle = in_mem_cache_fs->OpenFile(test_filename, FileOpenFlags::FILE_FLAGS_READ);
+		string content(TEST_FILE_SIZE, '\0');
+		in_mem_cache_fs->Read(*handle, const_cast<void *>(static_cast<const void *>(content.data())), TEST_FILE_SIZE,
+		                      /*location=*/0);
+		REQUIRE(content == std::string(TEST_FILE_SIZE, 'a'));
+		REQUIRE(mock_filesystem_ptr->GetVersionTagInvocation() == 0);
+		REQUIRE(mock_filesystem_ptr->GetSortedReadOperations().empty());
 	}
 }

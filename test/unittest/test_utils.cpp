@@ -42,6 +42,8 @@ TestCacheFileSystemHelper::TestCacheFileSystemHelper(TestCacheConfig config) : d
 
 	// Cache behavior
 	inst_config.clear_cache_on_write = config.clear_cache_on_write;
+	inst_config.enable_cache_validation = config.enable_cache_validation;
+	inst_config.cache_validation_directories = config.cache_validation_directories;
 
 	// Initialize profile collector for INVALID_INDEX (default when no FileOpener is provided in tests)
 	// This allows tests to configure a specific profile type (e.g., "temp" for stats collection tests)

@@ -152,6 +152,11 @@ struct InstanceConfig {
 
 	// Cache validation config
 	bool enable_cache_validation = DEFAULT_ENABLE_CACHE_VALIDATION;
+	// When non-empty, cache validation applies only to source paths under these directories.
+	vector<string> cache_validation_directories;
+
+	// Returns whether cache validation should be performed for the given source path.
+	bool ShouldValidateCacheForPath(const string &path) const;
 
 	// Cache invalidation on write config
 	bool clear_cache_on_write = DEFAULT_CLEAR_CACHE_ON_WRITE;

@@ -7,6 +7,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/database.hpp"
@@ -16,6 +17,43 @@
 #include "temp_profile_collector.hpp"
 
 namespace duckdb {
+
+namespace {
+
+bool PathStartsWithDirectory(const string &path, const string &directory) {
+	if (directory.empty()) {
+		return false;
+	}
+	if (path == directory) {
+		return true;
+	}
+
+	string normalized_directory = directory;
+	while (normalized_directory.size() > 1 && normalized_directory.back() == '/') {
+		normalized_directory.pop_back();
+	}
+	if (path == normalized_directory) {
+		return true;
+	}
+	return StringUtil::StartsWith(path, normalized_directory + "/");
+}
+
+} // namespace
+
+bool InstanceConfig::ShouldValidateCacheForPath(const string &path) const {
+	if (!enable_cache_validation) {
+		return false;
+	}
+	if (cache_validation_directories.empty()) {
+		return true;
+	}
+	for (const auto &directory : cache_validation_directories) {
+		if (PathStartsWithDirectory(path, directory)) {
+			return true;
+		}
+	}
+	return false;
+}
 
 //===--------------------------------------------------------------------===//
 // CacheHttpfsInstanceState implementation
