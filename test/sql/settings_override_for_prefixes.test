@@ -1,0 +1,121 @@
+# name: test/sql/settings_override_for_prefixes.test
+# description: test cache_httpfs_settings_override_for_prefixes
+# group: [sql]
+
+require notwindows
+
+require cache_httpfs
+
+# No overrides by default: echo is empty and resolution returns global defaults.
+query I
+SELECT * FROM cache_httpfs_get_settings_override();
+----
+(empty)
+
+query IIII
+SELECT * FROM cache_httpfs_resolve_settings('s3://bucket/file.parquet');
+----
+false	3600000	3600000	1800000
+
+# Set a valid override with two nested prefixes. Values are native JSON types (bool / integer).
+statement ok
+SET cache_httpfs_settings_override_for_prefixes='{"s3://b/":{"cache_httpfs_enable_cache_validation":true,"cache_httpfs_metadata_cache_entry_timeout_millisec":1000},"s3://b/data/":{"cache_httpfs_glob_cache_entry_timeout_millisec":500}}';
+
+# Echo returns the raw JSON verbatim.
+query I
+SELECT * FROM cache_httpfs_get_settings_override();
+----
+{"s3://b/":{"cache_httpfs_enable_cache_validation":true,"cache_httpfs_metadata_cache_entry_timeout_millisec":1000},"s3://b/data/":{"cache_httpfs_glob_cache_entry_timeout_millisec":500}}
+
+# Longest match is "s3://b/data/", which only overrides glob timeout; the rest fall back to global
+# (the shorter "s3://b/" entry is ignored entirely -- single longest entry wins).
+query IIII
+SELECT * FROM cache_httpfs_resolve_settings('s3://b/data/x.parquet');
+----
+false	3600000	3600000	500
+
+# Longest match is "s3://b/", which overrides validation + metadata timeout; glob/file fall back to global.
+query IIII
+SELECT * FROM cache_httpfs_resolve_settings('s3://b/other.parquet');
+----
+true	1000	3600000	1800000
+
+# Non-matching path returns all global defaults.
+query IIII
+SELECT * FROM cache_httpfs_resolve_settings('gcs://x/y.parquet');
+----
+false	3600000	3600000	1800000
+
+# Unknown setting name fails at SET time.
+statement error
+SET cache_httpfs_settings_override_for_prefixes='{"s3://b/":{"cache_httpfs_type":"in_mem"}}';
+----
+unknown setting
+
+# Malformed JSON fails.
+statement error
+SET cache_httpfs_settings_override_for_prefixes='{not json';
+----
+failed to parse
+
+# Top-level non-object fails.
+statement error
+SET cache_httpfs_settings_override_for_prefixes='"hello"';
+----
+must be an object
+
+# A prefix whose value is not an object fails.
+statement error
+SET cache_httpfs_settings_override_for_prefixes='{"s3://b/":true}';
+----
+must be an object
+
+# A boolean setting given a non-boolean value (e.g. a string) fails.
+statement error
+SET cache_httpfs_settings_override_for_prefixes='{"s3://b/":{"cache_httpfs_enable_cache_validation":"true"}}';
+----
+must be a boolean
+
+# A timeout given a string instead of a native integer fails.
+statement error
+SET cache_httpfs_settings_override_for_prefixes='{"s3://b/":{"cache_httpfs_metadata_cache_entry_timeout_millisec":"1000"}}';
+----
+must be a positive integer
+
+# A timeout given a negative integer fails.
+statement error
+SET cache_httpfs_settings_override_for_prefixes='{"s3://b/":{"cache_httpfs_metadata_cache_entry_timeout_millisec":-5}}';
+----
+must be a positive integer
+
+# A timeout given a non-integer number fails.
+statement error
+SET cache_httpfs_settings_override_for_prefixes='{"s3://b/":{"cache_httpfs_metadata_cache_entry_timeout_millisec":1000.5}}';
+----
+must be a positive integer
+
+# A zero timeout fails with the same message as the global setter.
+statement error
+SET cache_httpfs_settings_override_for_prefixes='{"s3://b/":{"cache_httpfs_metadata_cache_entry_timeout_millisec":0}}';
+----
+must be greater than 0
+
+# A failed SET leaves the previously committed override intact.
+query IIII
+SELECT * FROM cache_httpfs_resolve_settings('s3://b/other.parquet');
+----
+true	1000	3600000	1800000
+
+# Resetting with an empty string clears all overrides.
+statement ok
+SET cache_httpfs_settings_override_for_prefixes='';
+
+query I
+SELECT * FROM cache_httpfs_get_settings_override();
+----
+(empty)
+
+query IIII
+SELECT * FROM cache_httpfs_resolve_settings('s3://b/data/x.parquet');
+----
+false	3600000	3600000	1800000

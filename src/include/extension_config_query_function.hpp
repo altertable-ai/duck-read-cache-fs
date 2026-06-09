@@ -24,4 +24,10 @@ TableFunction GetCacheTypeQueryFunc();
 // Get table function to query cache extension config.
 TableFunction GetCacheConfigQueryFunc();
 
+// Get table function to echo the raw per-prefix settings override JSON.
+TableFunction GetSettingsOverrideQueryFunc();
+
+// Get table function to resolve the effective settings for a given path.
+TableFunction GetResolveSettingsQueryFunc();
+
 } // namespace duckdb
