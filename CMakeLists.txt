@@ -34,6 +34,7 @@ include_directories(src/utils/include)
 include_directories(src/include)
 include_directories(duckdb-httpfs/src/include)
 include_directories(duckdb/third_party/httplib)
+include_directories(duckdb/third_party/yyjson/include)
 
 # TODO(hjiang): httpfs has wasm client implementation, which is intentionally
 # ignored.
@@ -128,6 +129,9 @@ target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto
                       CURL::libcurl)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto
                       CURL::libcurl)
+
+target_link_libraries(${EXTENSION_NAME} duckdb_yyjson)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} duckdb_yyjson)
 
 # Link Windows Cryptography API library for certificate loading on Windows
 if(MINGW OR WIN32)

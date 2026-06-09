@@ -26,6 +26,7 @@
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/vector.hpp"
 #include "mutex.hpp"
+#include "optional.hpp"
 #include "thread_annotation.hpp"
 #include "time_utils.hpp"
 
@@ -89,7 +90,8 @@ public:
 
 	// Look up the entry with key `key` and remove from cache.
 	// If there're multiple values corresponds to the given [key]. the oldest value will be returned.
-	GetAndPopResult GetAndPop(const Key &key) {
+	// If `timeout_override` is set, it is used in place of the cache's default timeout for the staleness check.
+	GetAndPopResult GetAndPop(const Key &key, duckdb::optional<uint64_t> timeout_override = duckdb::nullopt) {
 		GetAndPopResult result;
 
 		const auto entry_map_iter = entry_map.find(key);
@@ -99,12 +101,13 @@ public:
 
 		// There're multiple entries correspond to the given [key], check whether they're stale one by one.
 		auto &entries = entry_map_iter->second;
-		if (timeout_millisec > 0) {
+		const uint64_t effective_timeout = timeout_override.has_value() ? *timeout_override : timeout_millisec;
+		if (effective_timeout > 0) {
 			const auto now = GetSteadyNowMilliSecSinceEpoch();
 			size_t cur_entries_size = entries.size();
 			while (cur_entries_size > 0) {
 				auto &cur_entry = entries.front();
-				if (now - cur_entry.timestamp > timeout_millisec) {
+				if (now - cur_entry.timestamp > effective_timeout) {
 					result.evicted_items.emplace_back(DeleteFirstEntry(entry_map_iter));
 					--cur_entries_size;
 					continue;
@@ -275,9 +278,10 @@ public:
 
 	// Look up the entry with key `key` and remove from cache.
 	// If there're multiple values corresponds to the given [key]. the oldest value will be returned.
-	GetAndPopResult GetAndPop(const Key &key) {
+	// If `timeout_override` is set, it is used in place of the cache's default timeout for the staleness check.
+	GetAndPopResult GetAndPop(const Key &key, duckdb::optional<uint64_t> timeout_override = duckdb::nullopt) {
 		concurrency::unique_lock<concurrency::mutex> lock(mu);
-		return internal_cache.GetAndPop(key);
+		return internal_cache.GetAndPop(key, timeout_override);
 	}
 
 	// Clear the cache and get all values, application could perform their processing logic upon these values.

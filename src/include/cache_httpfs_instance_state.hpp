@@ -7,6 +7,7 @@
 #include "base_profile_collector.hpp"
 #include "cache_exclusion_manager.hpp"
 #include "cache_filesystem_config.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
@@ -18,6 +19,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/storage/object_cache.hpp"
 #include "filesystem_utils.hpp"
+#include "optional.hpp"
 #include "thread_annotation.hpp"
 
 namespace duckdb {
@@ -109,6 +111,28 @@ private:
 };
 
 //===--------------------------------------------------------------------===//
+// Per-prefix settings override
+//===--------------------------------------------------------------------===//
+
+struct SettingsOverrideEntry {
+	duckdb::optional<bool> enable_cache_validation;
+	duckdb::optional<uint64_t> metadata_cache_entry_timeout_millisec;
+	duckdb::optional<uint64_t> file_handle_cache_entry_timeout_millisec;
+	duckdb::optional<uint64_t> glob_cache_entry_timeout_millisec;
+};
+
+struct ResolvedSettings {
+	bool enable_cache_validation;
+	uint64_t metadata_cache_entry_timeout_millisec;
+	uint64_t file_handle_cache_entry_timeout_millisec;
+	uint64_t glob_cache_entry_timeout_millisec;
+};
+
+// Ordered map of path-prefix to its settings override. Stored behind a `shared_ptr<const ...>` so it
+// can be swapped atomically at SET time without racing concurrent readers.
+using SettingsOverrideMap = map<string, SettingsOverrideEntry>;
+
+//===--------------------------------------------------------------------===//
 // Per-instance configuration
 //===--------------------------------------------------------------------===//
 struct InstanceConfig {
@@ -153,6 +177,10 @@ struct InstanceConfig {
 
 	// Cache invalidation on write config
 	bool clear_cache_on_write = DEFAULT_CLEAR_CACHE_ON_WRITE;
+
+	// Per-prefix settings overrides.
+	string settings_override_raw;
+	shared_ptr<const SettingsOverrideMap> settings_overrides;
 };
 
 //===--------------------------------------------------------------------===//
@@ -197,6 +225,9 @@ struct CacheHttpfsInstanceState : public ObjectCacheEntry {
 	void SetProfileCollector(string profile_type);
 	// Return if the path is allowed by current DB config.
 	bool CanAccessFile(const string &path);
+	// Resolve the effective settings for `path`, applying the single longest matching prefix override (if any) on
+	// top of the global config values.
+	ResolvedSettings ResolveSettingsForPath(const string &path) const;
 };
 
 //===--------------------------------------------------------------------===//
