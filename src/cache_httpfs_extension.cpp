@@ -27,6 +27,7 @@
 #include "hffs.hpp"
 #include "httpfs_extension.hpp"
 #include "s3fs.hpp"
+#include "yyjson.hpp"
 
 namespace duckdb {
 
@@ -305,6 +306,108 @@ void UpdateMaxFanoutSubrequest(ClientContext &context, SetScope scope, Value &pa
 void UpdateEnableCacheValidation(ClientContext &context, SetScope scope, Value &parameter) {
 	auto &inst_state = GetInstanceStateOrThrow(context);
 	inst_state.config.enable_cache_validation = parameter.GetValue<bool>();
+}
+
+//===--------------------------------------------------------------------===//
+// Per-prefix settings override parsing
+//===--------------------------------------------------------------------===//
+
+constexpr const char *OVERRIDE_ENABLE_CACHE_VALIDATION = "cache_httpfs_enable_cache_validation";
+constexpr const char *OVERRIDE_METADATA_TIMEOUT = "cache_httpfs_metadata_cache_entry_timeout_millisec";
+constexpr const char *OVERRIDE_FILE_HANDLE_TIMEOUT = "cache_httpfs_file_handle_cache_entry_timeout_millisec";
+constexpr const char *OVERRIDE_GLOB_TIMEOUT = "cache_httpfs_glob_cache_entry_timeout_millisec";
+
+bool ParseOverrideBool(const string &setting_name, const string &prefix, duckdb_yyjson::yyjson_val *val) {
+	if (!duckdb_yyjson::yyjson_is_bool(val)) {
+		throw InvalidInputException("cache_httpfs_settings_override_for_prefixes: value for setting '%s' (prefix '%s') "
+		                            "must be a boolean",
+		                            setting_name, prefix);
+	}
+	return duckdb_yyjson::yyjson_get_bool(val);
+}
+
+uint64_t ParseOverrideTimeout(const string &setting_name, const string &prefix, duckdb_yyjson::yyjson_val *val) {
+	if (!duckdb_yyjson::yyjson_is_uint(val)) {
+		throw InvalidInputException("cache_httpfs_settings_override_for_prefixes: value for setting '%s' (prefix '%s') "
+		                            "must be a positive integer",
+		                            setting_name, prefix);
+	}
+	const uint64_t timeout = duckdb_yyjson::yyjson_get_uint(val);
+	if (timeout == 0) {
+		throw InvalidInputException("%s must be greater than 0", setting_name);
+	}
+	return timeout;
+}
+
+struct YyjsonDocGuard {
+	duckdb_yyjson::yyjson_doc *doc = nullptr;
+	~YyjsonDocGuard() {
+		if (doc != nullptr) {
+			duckdb_yyjson::yyjson_doc_free(doc);
+		}
+	}
+};
+
+SettingsOverrideMap ParseSettingsOverrides(const string &json_str) {
+	SettingsOverrideMap result;
+	if (json_str.empty()) {
+		return result;
+	}
+
+	YyjsonDocGuard guard;
+	guard.doc = duckdb_yyjson::yyjson_read(json_str.c_str(), json_str.size(), 0);
+	if (guard.doc == nullptr) {
+		throw InvalidInputException("cache_httpfs_settings_override_for_prefixes: failed to parse JSON string '%s'",
+		                            json_str);
+	}
+	duckdb_yyjson::yyjson_val *root = yyjson_doc_get_root(guard.doc);
+	if (!yyjson_is_obj(root)) {
+		throw InvalidInputException("cache_httpfs_settings_override_for_prefixes: top-level JSON value must be an "
+		                            "object mapping prefix to settings");
+	}
+
+	duckdb_yyjson::yyjson_obj_iter prefix_iter = yyjson_obj_iter_with(root);
+	duckdb_yyjson::yyjson_val *prefix_key;
+	while ((prefix_key = yyjson_obj_iter_next(&prefix_iter)) != nullptr) {
+		duckdb_yyjson::yyjson_val *prefix_val = yyjson_obj_iter_get_val(prefix_key);
+		const string prefix = yyjson_get_str(prefix_key);
+		if (!yyjson_is_obj(prefix_val)) {
+			throw InvalidInputException(
+			    "cache_httpfs_settings_override_for_prefixes: value for prefix '%s' must be an object", prefix);
+		}
+
+		SettingsOverrideEntry entry;
+		duckdb_yyjson::yyjson_obj_iter setting_iter = yyjson_obj_iter_with(prefix_val);
+		duckdb_yyjson::yyjson_val *setting_key;
+		while ((setting_key = yyjson_obj_iter_next(&setting_iter)) != nullptr) {
+			duckdb_yyjson::yyjson_val *setting_val = yyjson_obj_iter_get_val(setting_key);
+			const string setting_name = yyjson_get_str(setting_key);
+
+			if (setting_name == OVERRIDE_ENABLE_CACHE_VALIDATION) {
+				entry.enable_cache_validation = ParseOverrideBool(setting_name, prefix, setting_val);
+			} else if (setting_name == OVERRIDE_METADATA_TIMEOUT) {
+				entry.metadata_cache_entry_timeout_millisec = ParseOverrideTimeout(setting_name, prefix, setting_val);
+			} else if (setting_name == OVERRIDE_FILE_HANDLE_TIMEOUT) {
+				entry.file_handle_cache_entry_timeout_millisec =
+				    ParseOverrideTimeout(setting_name, prefix, setting_val);
+			} else if (setting_name == OVERRIDE_GLOB_TIMEOUT) {
+				entry.glob_cache_entry_timeout_millisec = ParseOverrideTimeout(setting_name, prefix, setting_val);
+			} else {
+				throw InvalidInputException("cache_httpfs_settings_override_for_prefixes: unknown setting '%s'",
+				                            setting_name);
+			}
+		}
+		result[prefix] = std::move(entry);
+	}
+	return result;
+}
+
+void UpdateSettingsOverrideForPrefixes(ClientContext &context, SetScope scope, Value &parameter) {
+	auto &inst_state = GetInstanceStateOrThrow(context);
+	auto raw = parameter.ToString();
+	auto parsed = ParseSettingsOverrides(raw);
+	inst_state.config.settings_overrides = make_shared_ptr<const SettingsOverrideMap>(std::move(parsed));
+	inst_state.config.settings_override_raw = std::move(raw);
 }
 
 void UpdateClearCacheOnWrite(ClientContext &context, SetScope scope, Value &parameter) {
@@ -624,6 +727,17 @@ void LoadInternal(ExtensionLoader &loader) {
 	                          "modification timestamp to ensure cache consistency. By default disabled.",
 	                          LogicalTypeId::BOOLEAN, DEFAULT_ENABLE_CACHE_VALIDATION, UpdateEnableCacheValidation);
 
+	// Per-prefix settings overrides.
+	config.AddExtensionOption(
+	    "cache_httpfs_settings_override_for_prefixes",
+	    "JSON object mapping a path prefix to per-prefix overrides of a fixed set of settings: "
+	    "cache_httpfs_enable_cache_validation, cache_httpfs_metadata_cache_entry_timeout_millisec, "
+	    "cache_httpfs_file_handle_cache_entry_timeout_millisec, cache_httpfs_glob_cache_entry_timeout_millisec. "
+	    "Format: {\"<prefix>\": {\"<setting>\": <value>}}, where <value> is a native JSON boolean for cache "
+	    "validation and a positive JSON integer for timeouts. For a given file path the single longest matching "
+	    "prefix wins; settings it omits fall back to the global value. An empty string clears all overrides.",
+	    LogicalType {LogicalTypeId::VARCHAR}, string {}, UpdateSettingsOverrideForPrefixes);
+
 	// Cache invalidation on write config.
 	config.AddExtensionOption(
 	    "cache_httpfs_clear_cache_on_write",
@@ -801,6 +915,8 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetGlobCacheConfigQueryFunc());
 	loader.RegisterFunction(GetCacheTypeQueryFunc());
 	loader.RegisterFunction(GetCacheConfigQueryFunc());
+	loader.RegisterFunction(GetSettingsOverrideQueryFunc());
+	loader.RegisterFunction(GetResolveSettingsQueryFunc());
 
 	// Register filesystem registration query function.
 	loader.RegisterFunction(ListRegisteredFileSystemsQueryFunc());

@@ -29,6 +29,52 @@ bool CacheHttpfsInstanceState::CanAccessFile(const string &path) {
 	// TODO(hjiang): add logging if requested file not accessible.
 }
 
+ResolvedSettings CacheHttpfsInstanceState::ResolveSettingsForPath(const string &path) const {
+	ResolvedSettings resolved {
+	    .enable_cache_validation = config.enable_cache_validation,
+	    .metadata_cache_entry_timeout_millisec = config.metadata_cache_entry_timeout_millisec,
+	    .file_handle_cache_entry_timeout_millisec = config.file_handle_cache_entry_timeout_millisec,
+	    .glob_cache_entry_timeout_millisec = config.glob_cache_entry_timeout_millisec,
+	};
+
+	const auto overrides = config.settings_overrides;
+	if (overrides == nullptr) {
+		return resolved;
+	}
+
+	const SettingsOverrideEntry *best = nullptr;
+	size_t best_len = 0;
+	for (const auto &kv : *overrides) {
+		const string &prefix = kv.first;
+		if (path.size() >= prefix.size() && path.compare(0, prefix.size(), prefix) == 0 && prefix.size() >= best_len) {
+			best = &kv.second;
+			best_len = prefix.size();
+		}
+	}
+
+	if (best == nullptr) {
+		return resolved;
+	}
+
+	if (best->enable_cache_validation.has_value()) {
+		resolved.enable_cache_validation = *best->enable_cache_validation;
+	}
+
+	if (best->metadata_cache_entry_timeout_millisec.has_value()) {
+		resolved.metadata_cache_entry_timeout_millisec = *best->metadata_cache_entry_timeout_millisec;
+	}
+
+	if (best->file_handle_cache_entry_timeout_millisec.has_value()) {
+		resolved.file_handle_cache_entry_timeout_millisec = *best->file_handle_cache_entry_timeout_millisec;
+	}
+
+	if (best->glob_cache_entry_timeout_millisec.has_value()) {
+		resolved.glob_cache_entry_timeout_millisec = *best->glob_cache_entry_timeout_millisec;
+	}
+
+	return resolved;
+}
+
 CacheHttpfsInstanceState::~CacheHttpfsInstanceState() {
 	// Clear in-memory cache entries to prevent potential invalid memory access.
 	// Reference: https://github.com/dentiny/duck-read-cache-fs/issues/452

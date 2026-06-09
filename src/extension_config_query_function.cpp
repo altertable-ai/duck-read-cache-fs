@@ -420,6 +420,87 @@ void CacheConfigQueryTableFunc(ClientContext &context, TableFunctionInput &data_
 
 	output.SetCardinality(/*count_p=*/1);
 }
+
+//===--------------------------------------------------------------------===//
+// Settings override echo query function
+//===--------------------------------------------------------------------===//
+
+unique_ptr<FunctionData> SettingsOverrideQueryFuncBind(ClientContext &context, TableFunctionBindInput &input,
+                                                       vector<LogicalType> &return_types, vector<string> &names) {
+	ALWAYS_ASSERT(return_types.empty());
+	ALWAYS_ASSERT(names.empty());
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
+	names.emplace_back("settings override for prefixes");
+	return nullptr;
+}
+
+unique_ptr<GlobalTableFunctionState> SettingsOverrideQueryFuncInit(ClientContext &context,
+                                                                   TableFunctionInitInput &input) {
+	return make_uniq<CacheConfigData>();
+}
+
+void SettingsOverrideQueryTableFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.global_state->Cast<CacheConfigData>();
+	if (data.emitted) {
+		return;
+	}
+	data.emitted = true;
+
+	auto config = GetConfigFromContext(context);
+	output.SetValue(/*col_idx=*/0, /*index=*/0, Value {config.settings_override_raw});
+	output.SetCardinality(/*count_p=*/1);
+}
+
+//===--------------------------------------------------------------------===//
+// Resolved settings query function (probe of per-path resolution)
+//===--------------------------------------------------------------------===//
+
+struct ResolveSettingsBindData : public TableFunctionData {
+	string path;
+};
+
+unique_ptr<FunctionData> ResolveSettingsQueryFuncBind(ClientContext &context, TableFunctionBindInput &input,
+                                                      vector<LogicalType> &return_types, vector<string> &names) {
+	ALWAYS_ASSERT(return_types.empty());
+	ALWAYS_ASSERT(names.empty());
+
+	return_types.emplace_back(LogicalTypeId::BOOLEAN);
+	names.emplace_back("enable_cache_validation");
+	return_types.emplace_back(LogicalTypeId::UBIGINT);
+	names.emplace_back("metadata_cache_entry_timeout_millisec");
+	return_types.emplace_back(LogicalTypeId::UBIGINT);
+	names.emplace_back("file_handle_cache_entry_timeout_millisec");
+	return_types.emplace_back(LogicalTypeId::UBIGINT);
+	names.emplace_back("glob_cache_entry_timeout_millisec");
+
+	auto result = make_uniq<ResolveSettingsBindData>();
+	result->path = input.inputs[0].GetValue<string>();
+	return std::move(result);
+}
+
+unique_ptr<GlobalTableFunctionState> ResolveSettingsQueryFuncInit(ClientContext &context,
+                                                                  TableFunctionInitInput &input) {
+	return make_uniq<CacheConfigData>();
+}
+
+void ResolveSettingsQueryTableFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.global_state->Cast<CacheConfigData>();
+	if (data.emitted) {
+		return;
+	}
+	data.emitted = true;
+
+	const auto &bind_data = data_p.bind_data->Cast<ResolveSettingsBindData>();
+	auto &state = GetInstanceStateOrThrow(*context.db);
+	const auto resolved = state.ResolveSettingsForPath(bind_data.path);
+
+	idx_t col = 0;
+	output.SetValue(col++, /*index=*/0, Value::BOOLEAN(resolved.enable_cache_validation));
+	output.SetValue(col++, /*index=*/0, Value::UBIGINT(resolved.metadata_cache_entry_timeout_millisec));
+	output.SetValue(col++, /*index=*/0, Value::UBIGINT(resolved.file_handle_cache_entry_timeout_millisec));
+	output.SetValue(col++, /*index=*/0, Value::UBIGINT(resolved.glob_cache_entry_timeout_millisec));
+	output.SetCardinality(/*count_p=*/1);
+}
 } // namespace
 
 TableFunction GetDataCacheConfigQueryFunc() {
@@ -474,6 +555,24 @@ TableFunction GetCacheConfigQueryFunc() {
 	                                           /*bind=*/CacheConfigQueryFuncBind,
 	                                           /*init_global=*/CacheConfigQueryFuncInit};
 	return get_cache_config_query_func;
+}
+
+TableFunction GetSettingsOverrideQueryFunc() {
+	TableFunction get_settings_override_query_func {/*name=*/"cache_httpfs_get_settings_override",
+	                                                /*arguments=*/ {},
+	                                                /*function=*/SettingsOverrideQueryTableFunc,
+	                                                /*bind=*/SettingsOverrideQueryFuncBind,
+	                                                /*init_global=*/SettingsOverrideQueryFuncInit};
+	return get_settings_override_query_func;
+}
+
+TableFunction GetResolveSettingsQueryFunc() {
+	TableFunction get_resolve_settings_query_func {/*name=*/"cache_httpfs_resolve_settings",
+	                                               /*arguments=*/ {LogicalType {LogicalTypeId::VARCHAR}},
+	                                               /*function=*/ResolveSettingsQueryTableFunc,
+	                                               /*bind=*/ResolveSettingsQueryFuncBind,
+	                                               /*init_global=*/ResolveSettingsQueryFuncInit};
+	return get_resolve_settings_query_func;
 }
 
 } // namespace duckdb

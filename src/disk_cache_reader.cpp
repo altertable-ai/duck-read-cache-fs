@@ -238,7 +238,9 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 	vector<std::future<void>> io_task_futures;
 	io_task_futures.reserve(task_count);
 	// Get file-level metadata once before processing chunks.
-	string version_tag = config.enable_cache_validation ? handle.Cast<CacheFileSystemHandle>().GetVersionTag() : "";
+	const bool enable_cache_validation =
+	    instance_state_locked->ResolveSettingsForPath(handle.GetPath()).enable_cache_validation;
+	string version_tag = enable_cache_validation ? handle.Cast<CacheFileSystemHandle>().GetVersionTag() : "";
 
 	// To improve IO performance, we split requested bytes (after alignment) into multiple chunks and fetch them in
 	// parallel.

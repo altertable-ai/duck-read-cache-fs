@@ -20,6 +20,7 @@
 #include "duckdb/common/vector.hpp"
 #include "map_utils.hpp"
 #include "mutex.hpp"
+#include "optional.hpp"
 #include "thread_annotation.hpp"
 #include "time_utils.hpp"
 
@@ -86,16 +87,18 @@ public:
 
 	// Look up the entry with key `key`.
 	// Return nullptr if `key` doesn't exist in cache.
-	shared_ptr<Val> Get(const Key &key) {
+	// If `timeout_override` is set, it is used in place of the cache's default timeout for the staleness check.
+	shared_ptr<Val> Get(const Key &key, duckdb::optional<uint64_t> timeout_override = duckdb::nullopt) {
 		const auto entry_map_iter = entry_map.find(key);
 		if (entry_map_iter == entry_map.end()) {
 			return nullptr;
 		}
 
 		// Check whether found cache entry is expired or not.
-		if (timeout_millisec > 0) {
+		const uint64_t effective_timeout = timeout_override.has_value() ? *timeout_override : timeout_millisec;
+		if (effective_timeout > 0) {
 			const auto now = GetSteadyNowMilliSecSinceEpoch();
-			if (now - entry_map_iter->second.timestamp > timeout_millisec) {
+			if (now - entry_map_iter->second.timestamp > effective_timeout) {
 				DeleteImpl(entry_map_iter);
 				return nullptr;
 			}
@@ -246,9 +249,10 @@ public:
 
 	// Look up the entry with key `key`.
 	// Return nullptr if `key` doesn't exist in cache.
-	shared_ptr<Val> Get(const Key &key) {
+	// If `timeout_override` is set, it is used in place of the cache's default timeout for the staleness check.
+	shared_ptr<Val> Get(const Key &key, duckdb::optional<uint64_t> timeout_override = duckdb::nullopt) {
 		concurrency::unique_lock<concurrency::mutex> lock(mu);
-		return internal_cache.Get(key);
+		return internal_cache.Get(key, timeout_override);
 	}
 
 	// Clear the cache.
@@ -283,14 +287,16 @@ public:
 	}
 
 	// Get or creation for cached key-value pairs.
+	// If `timeout_override` is set, it is used in place of the cache's default timeout for the staleness check.
 	//
 	// WARNING: Currently factory cannot have exception thrown.
-	shared_ptr<Val> GetOrCreate(const Key &key, std::function<shared_ptr<Val>(const Key &)> factory) {
+	shared_ptr<Val> GetOrCreate(const Key &key, std::function<shared_ptr<Val>(const Key &)> factory,
+	                            duckdb::optional<uint64_t> timeout_override = duckdb::nullopt) {
 		shared_ptr<CreationToken> creation_token;
 
 		{
 			concurrency::unique_lock<concurrency::mutex> lck(mu);
-			auto cached_val = internal_cache.Get(key);
+			auto cached_val = internal_cache.Get(key, timeout_override);
 			if (cached_val != nullptr) {
 				return cached_val;
 			}
