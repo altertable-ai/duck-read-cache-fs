@@ -12,15 +12,18 @@
 #include "cache_httpfs_instance_state.hpp"
 #include "cache_status_query_function.hpp"
 #include "disk_cache_util.hpp"
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/opener_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
+#include "duckdb/main/connection.hpp"
 #include "duckdb/main/extension_callback_manager.hpp"
 #include "duckdb/main/extension_manager.hpp"
 #include "duckdb/main/setting_info.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/storage/external_file_cache.hpp"
 #include "extension_config_query_function.hpp"
 #include "fake_filesystem.hpp"
@@ -101,6 +104,19 @@ void ClearCacheForFile(const DataChunk &args, ExpressionState &state, Vector &re
 	result.Reference(Value(SUCCESS));
 }
 
+void WarmRange(CacheFileSystem &target, FileHandle &handle, idx_t offset, idx_t length, idx_t block_size) {
+	constexpr idx_t WARM_WINDOW_BYTES = 32ULL << 20; // 32 MiB.
+	const idx_t blocks_per_window = MaxValue<idx_t>(1, WARM_WINDOW_BYTES / block_size);
+	const idx_t window = blocks_per_window * block_size;
+	const idx_t end = offset + length;
+
+	vector<char> scratch(window);
+	for (idx_t pos = offset; pos < end; pos += window) {
+		const idx_t bytes_to_read = MinValue<idx_t>(window, end - pos);
+		target.Read(handle, scratch.data(), NumericCast<int64_t>(bytes_to_read), pos);
+	}
+}
+
 // Pre-populate the cache for the given remote file. Returns TRUE on success, FALSE if the file doesn't exist or its
 // filesystem isn't wrapped by the cache.
 void CacheFile(const DataChunk &args, ExpressionState &state, Vector &result) {
@@ -133,16 +149,124 @@ void CacheFile(const DataChunk &args, ExpressionState &state, Vector &result) {
 	auto handle = target->OpenFile(filepath, FileOpenFlags::FILE_FLAGS_READ, &opener);
 	const idx_t file_size = NumericCast<idx_t>(target->GetFileSize(*handle));
 
-	constexpr idx_t WARM_WINDOW_BYTES = 32ULL << 20; // 32 MiB.
-	const idx_t block_size = inst_state.config.cache_block_size;
-	const idx_t blocks_per_window = MaxValue<idx_t>(1, WARM_WINDOW_BYTES / block_size);
-	const idx_t window = blocks_per_window * block_size;
+	WarmRange(*target, *handle, /*offset=*/0, /*length=*/file_size, inst_state.config.cache_block_size);
+	result.Reference(Value(true));
+}
 
-	vector<char> scratch(window);
-	for (idx_t offset = 0; offset < file_size; offset += window) {
-		const idx_t bytes_to_read = MinValue<idx_t>(window, file_size - offset);
-		target->Read(*handle, scratch.data(), NumericCast<int64_t>(bytes_to_read), offset);
+struct CacheParquetBindData : public FunctionData {
+	bool is_exclude = false;
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<CacheParquetBindData>(*this);
 	}
+	bool Equals(const FunctionData &other) const override {
+		return is_exclude == other.Cast<CacheParquetBindData>().is_exclude;
+	}
+};
+
+unique_ptr<FunctionData> CacheParquetFileBind(ClientContext &context, ScalarFunction &bound_function,
+                                              vector<unique_ptr<Expression>> &arguments) {
+	auto bind_data = make_uniq<CacheParquetBindData>();
+	const string alias = arguments[1]->GetAlias();
+	if (StringUtil::CIEquals(alias, "exclude")) {
+		bind_data->is_exclude = true;
+	} else if (!alias.empty() && !StringUtil::CIEquals(alias, "include")) {
+		throw BinderException("cache_httpfs_cache_parquet_file: column list argument alias must be 'include' or "
+		                      "'exclude', got '%s'",
+		                      alias);
+	}
+	return std::move(bind_data);
+}
+
+void CacheParquetFile(const DataChunk &args, ExpressionState &state, Vector &result) {
+	ALWAYS_ASSERT(args.ColumnCount() == 2);
+	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	const bool is_exclude = func_expr.bind_info->Cast<CacheParquetBindData>().is_exclude;
+
+	const string filepath = args.GetValue(/*col_idx=*/0, /*index=*/0).ToString();
+
+	case_insensitive_set_t requested_columns;
+	const Value column_list = args.GetValue(/*col_idx=*/1, /*index=*/0);
+	if (!column_list.IsNull()) {
+		for (const auto &col : ListValue::GetChildren(column_list)) {
+			if (!col.IsNull()) {
+				requested_columns.insert(StringValue::Get(col));
+			}
+		}
+	}
+
+	auto &instance = GetDatabaseInstance(state);
+	auto &inst_state = GetInstanceStateOrThrow(instance);
+
+	CacheFileSystem *target = nullptr;
+	for (auto *cur_cache_fs : inst_state.registry.GetAllCacheFs()) {
+		if (cur_cache_fs->CanHandleFile(filepath)) {
+			target = cur_cache_fs;
+			break;
+		}
+	}
+	if (target == nullptr) {
+		result.Reference(Value(false));
+		return;
+	}
+
+	auto &client_context = state.root.executor->GetContext();
+	ClientContextFileOpener opener(client_context);
+
+	if (!target->FileExists(filepath, &opener)) {
+		result.Reference(Value(false));
+		return;
+	}
+
+	Connection con(instance);
+	const string escaped_filepath = StringUtil::Replace(filepath, "'", "''");
+	auto metadata = con.Query(StringUtil::Format("SELECT path_in_schema, data_page_offset, dictionary_page_offset, "
+	                                             "total_compressed_size FROM parquet_metadata('%s')",
+	                                             escaped_filepath));
+	if (metadata->HasError()) {
+		// Not a parquet file, unreadable, or the parquet extension is unavailable.
+		result.Reference(Value(false));
+		return;
+	}
+
+	vector<pair<idx_t, idx_t>> ranges;
+	for (idx_t row = 0; row < metadata->RowCount(); ++row) {
+		const string path_in_schema = metadata->GetValue(/*column=*/0, row).ToString();
+		// Top-level column name (parquet leaves of nested columns share a dotted prefix).
+		const string top_level = path_in_schema.substr(0, path_in_schema.find('.'));
+		const bool wanted = requested_columns.find(top_level) != requested_columns.end();
+		if (is_exclude ? wanted : !wanted) {
+			continue;
+		}
+
+		const auto data_page_offset = NumericCast<idx_t>(metadata->GetValue(/*column=*/1, row).GetValue<int64_t>());
+		const Value dictionary_page_offset = metadata->GetValue(/*column=*/2, row);
+		idx_t start = data_page_offset;
+		if (!dictionary_page_offset.IsNull() && dictionary_page_offset.GetValue<int64_t>() > 0) {
+			start = NumericCast<idx_t>(dictionary_page_offset.GetValue<int64_t>());
+		}
+		const auto total_compressed_size =
+		    NumericCast<idx_t>(metadata->GetValue(/*column=*/3, row).GetValue<int64_t>());
+		ranges.emplace_back(start, start + total_compressed_size);
+	}
+
+	// Coalesce overlapping / adjacent ranges to bound the number of Read calls on files with many row groups.
+	std::sort(ranges.begin(), ranges.end());
+	vector<pair<idx_t, idx_t>> merged;
+	for (const auto &range : ranges) {
+		if (!merged.empty() && range.first <= merged.back().second) {
+			merged.back().second = MaxValue<idx_t>(merged.back().second, range.second);
+		} else {
+			merged.emplace_back(range);
+		}
+	}
+
+	auto handle = target->OpenFile(filepath, FileOpenFlags::FILE_FLAGS_READ, &opener);
+	const idx_t block_size = inst_state.config.cache_block_size;
+	for (const auto &range : merged) {
+		WarmRange(*target, *handle, range.first, range.second - range.first, block_size);
+	}
+
 	result.Reference(Value(true));
 }
 
@@ -955,6 +1079,14 @@ void LoadInternal(ExtensionLoader &loader) {
 	                                   /*arguments=*/ {LogicalType {LogicalTypeId::VARCHAR}},
 	                                   /*return_type=*/LogicalType {LogicalTypeId::BOOLEAN}, CacheFile);
 	loader.RegisterFunction(cache_file_function);
+
+	// Register a function to pre-populate the cache for a subset of a parquet file's columns. The column list argument
+	// accepts an `include :=` / `exclude :=` alias (defaulting to include) to select or exclude the listed columns.
+	ScalarFunction cache_parquet_file_function(
+	    "cache_httpfs_cache_parquet_file",
+	    /*arguments=*/ {LogicalType {LogicalTypeId::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR)},
+	    /*return_type=*/LogicalType {LogicalTypeId::BOOLEAN}, CacheParquetFile, CacheParquetFileBind);
+	loader.RegisterFunction(cache_parquet_file_function);
 
 	// Register a function to wrap all duckdb-vfs-compatible filesystems. By default only httpfs filesystem instances
 	// are wrapped. Usage for the target filesystem can be used as normal.

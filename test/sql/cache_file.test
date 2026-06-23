@@ -1,0 +1,58 @@
+# name: test/sql/cache_file.test
+# description: test cache_httpfs_cache_file pre-populates the cache without materializing file content
+# group: [sql]
+
+require cache_httpfs
+
+statement ok
+SET cache_httpfs_type='in_mem';
+
+statement ok
+SET cache_httpfs_profile_type='temp';
+
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+# Caching a non-existent file returns false and caches nothing.
+query I
+SELECT cache_httpfs_cache_file('https://raw.githubusercontent.com/dentiny/duck-read-cache-fs/refs/heads/main/test/data/does-not-exist.csv');
+----
+false
+
+query IIIII
+SELECT * FROM cache_httpfs_cache_status_query();
+----
+
+# Caching a real file returns true and populates the data cache.
+query I
+SELECT cache_httpfs_cache_file('https://raw.githubusercontent.com/dentiny/duck-read-cache-fs/refs/heads/main/test/data/stock-exchanges.csv');
+----
+true
+
+query I
+SELECT COUNT(*) FROM cache_httpfs_cache_status_query();
+----
+1
+
+# Re-caching an already-cached file is a no-op that still returns true.
+query I
+SELECT cache_httpfs_cache_file('https://raw.githubusercontent.com/dentiny/duck-read-cache-fs/refs/heads/main/test/data/stock-exchanges.csv');
+----
+true
+
+# A subsequent read of the file is served entirely from the warmed cache: data cache hits, no misses.
+# This also validates that the warm-up cached the same block keys a real read looks up.
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+query I
+SELECT COUNT(*) FROM read_csv_auto('https://raw.githubusercontent.com/dentiny/duck-read-cache-fs/refs/heads/main/test/data/stock-exchanges.csv');
+----
+251
+
+query I
+SELECT cache_hit_count > 0 AND cache_miss_count = 0
+FROM cache_httpfs_cache_access_info_query()
+WHERE cache_type = 'data';
+----
+true
