@@ -30,6 +30,8 @@ Key features:
 - Cache status query functions provide visibility into cache state and access:
   + `cache_httpfs_cache_status_query()` - Returns information about all cached entries including cache filepath, remote filename, byte ranges (start_offset, end_offset), and cache type (in-memory or on-disk)
   + `cache_httpfs_cache_access_info_query()` - Returns cache access statistics including cache hit/miss counts, bytes read, and bytes cached for different cache entities (data, metadata, file handles, glob)
+- Cache pre-population:
+  + `cache_httpfs_cache_file('s3://...')` - Downloads a remote file into the cache block by block, using the same chunking as a normal read but without materializing the file content in memory (unlike `SELECT * FROM read_parquet(...)`). Returns `TRUE` on success, `FALSE` if the file doesn't exist or its filesystem isn't wrapped by the cache. Re-caching an already-cached file is a no-op that still returns `TRUE`.
 - 100% Compatibility with duckdb `httpfs`
   + Extension is built upon `httpfs` extension and automatically load it beforehand, so it's fully compatible with it; we provide option `SET cache_httpfs_type='noop'; SET enable_external_file_cache=true;` to fallback to and behave exactly as httpfs.
 - Interaction with duckdb internal "external file cache". Duckdb by default enables external file cache, to avoid double caching cache_httpfs extension by default disable external file cache, which could be re-enabled by `SET enable_external_file_cache=true;`.

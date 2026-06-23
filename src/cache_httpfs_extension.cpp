@@ -17,6 +17,7 @@
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/opener_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/extension_callback_manager.hpp"
 #include "duckdb/main/extension_manager.hpp"
 #include "duckdb/main/setting_info.hpp"
@@ -98,6 +99,51 @@ void ClearCacheForFile(const DataChunk &args, ExpressionState &state, Vector &re
 	}
 
 	result.Reference(Value(SUCCESS));
+}
+
+// Pre-populate the cache for the given remote file. Returns TRUE on success, FALSE if the file doesn't exist or its
+// filesystem isn't wrapped by the cache.
+void CacheFile(const DataChunk &args, ExpressionState &state, Vector &result) {
+	ALWAYS_ASSERT(args.ColumnCount() == 1);
+	const string filepath = args.GetValue(/*col_idx=*/0, /*index=*/0).ToString();
+
+	auto &instance = GetDatabaseInstance(state);
+	auto &inst_state = GetInstanceStateOrThrow(instance);
+
+	CacheFileSystem *target = nullptr;
+	for (auto *cur_cache_fs : inst_state.registry.GetAllCacheFs()) {
+		if (cur_cache_fs->CanHandleFile(filepath)) {
+			target = cur_cache_fs;
+			break;
+		}
+	}
+	if (target == nullptr) {
+		result.Reference(Value(false));
+		return;
+	}
+
+	auto &client_context = state.root.executor->GetContext();
+	ClientContextFileOpener opener(client_context);
+
+	if (!target->FileExists(filepath, &opener)) {
+		result.Reference(Value(false));
+		return;
+	}
+
+	auto handle = target->OpenFile(filepath, FileOpenFlags::FILE_FLAGS_READ, &opener);
+	const idx_t file_size = NumericCast<idx_t>(target->GetFileSize(*handle));
+
+	constexpr idx_t WARM_WINDOW_BYTES = 32ULL << 20; // 32 MiB.
+	const idx_t block_size = inst_state.config.cache_block_size;
+	const idx_t blocks_per_window = MaxValue<idx_t>(1, WARM_WINDOW_BYTES / block_size);
+	const idx_t window = blocks_per_window * block_size;
+
+	vector<char> scratch(window);
+	for (idx_t offset = 0; offset < file_size; offset += window) {
+		const idx_t bytes_to_read = MinValue<idx_t>(window, file_size - offset);
+		target->Read(*handle, scratch.data(), NumericCast<int64_t>(bytes_to_read), offset);
+	}
+	result.Reference(Value(true));
 }
 
 // Clean up dead temporary cache files (creation time older than 10 minutes). Returns the number of files deleted.
@@ -903,6 +949,12 @@ void LoadInternal(ExtensionLoader &loader) {
 	                                             /*return_type=*/LogicalType {LogicalTypeId::BOOLEAN},
 	                                             ClearCacheForFile);
 	loader.RegisterFunction(clear_cache_for_file_function);
+
+	// Register a function to pre-populate the cache for the given file.
+	ScalarFunction cache_file_function("cache_httpfs_cache_file",
+	                                   /*arguments=*/ {LogicalType {LogicalTypeId::VARCHAR}},
+	                                   /*return_type=*/LogicalType {LogicalTypeId::BOOLEAN}, CacheFile);
+	loader.RegisterFunction(cache_file_function);
 
 	// Register a function to wrap all duckdb-vfs-compatible filesystems. By default only httpfs filesystem instances
 	// are wrapped. Usage for the target filesystem can be used as normal.
