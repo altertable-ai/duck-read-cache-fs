@@ -224,9 +224,9 @@ void CacheParquetFile(const DataChunk &args, ExpressionState &state, Vector &res
 	                                             "total_compressed_size FROM parquet_metadata('%s')",
 	                                             escaped_filepath));
 	if (metadata->HasError()) {
-		// Not a parquet file, unreadable, or the parquet extension is unavailable.
-		result.Reference(Value(false));
-		return;
+		// The file exists but can't be read as parquet (not a parquet file, an IO error, or the parquet extension is
+		// unavailable). Surface the underlying error rather than silently returning false.
+		metadata->ThrowError("cache_httpfs_cache_parquet_file failed to read parquet metadata: ");
 	}
 
 	vector<pair<idx_t, idx_t>> ranges;

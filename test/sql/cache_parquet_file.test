@@ -42,11 +42,11 @@ SELECT cache_httpfs_cache_parquet_file('/tmp/cache_httpfs_fake_filesystem/does-n
 ----
 false
 
-# Caching an existing non-parquet file returns false (parquet_metadata errors).
-query I
+# Caching an existing file that isn't readable as parquet surfaces the underlying error.
+statement error
 SELECT cache_httpfs_cache_parquet_file('/tmp/cache_httpfs_fake_filesystem/cache_parquet_not_parquet.csv', ['x']);
 ----
-false
+failed to read parquet metadata
 
 # An invalid column-list alias is a bind error.
 statement error
