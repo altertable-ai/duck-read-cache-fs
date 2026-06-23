@@ -1,0 +1,167 @@
+# name: test/sql/cache_parquet_file.test
+# description: cache_httpfs_cache_parquet_file warms only the included (or non-excluded) columns' cache blocks
+# group: [sql]
+
+require notwindows
+
+require parquet
+
+require cache_httpfs
+
+statement ok
+SET cache_httpfs_type='in_mem';
+
+statement ok
+SET cache_httpfs_profile_type='temp';
+
+# Small cache blocks so distinct columns land in distinct cache blocks, making per-column hits/misses observable.
+statement ok
+SET cache_httpfs_cache_block_size=4096;
+
+# Hold all warmed blocks in memory (the default 256-block cap would otherwise evict early columns mid-warm).
+statement ok
+SET cache_httpfs_max_in_mem_cache_block_count=8192;
+
+# Poorly-compressible columns (hash) so each column chunk spans many 4 KiB blocks and the columns are well separated
+# within a single row group: id@4 (~400 KiB), a (~800 KiB), b (~800 KiB), c (~800 KiB).
+statement ok
+COPY (
+    SELECT i AS id, hash(i) AS a, hash(i * 7) AS b, hash(i * 13) AS c
+    FROM range(100000) t(i)
+) TO '/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 100000);
+
+statement ok
+COPY (SELECT 1 AS x) TO '/tmp/cache_httpfs_fake_filesystem/cache_parquet_not_parquet.csv' (FORMAT CSV);
+
+statement ok
+SELECT cache_httpfs_wrap_cache_filesystem('cache_httpfs_fake_filesystem');
+
+# Caching a non-existent file returns false.
+query I
+SELECT cache_httpfs_cache_parquet_file('/tmp/cache_httpfs_fake_filesystem/does-not-exist.parquet', ['a']);
+----
+false
+
+# Caching an existing file that isn't readable as parquet surfaces the underlying error.
+statement error
+SELECT cache_httpfs_cache_parquet_file('/tmp/cache_httpfs_fake_filesystem/cache_parquet_not_parquet.csv', ['x']);
+----
+failed to read parquet metadata
+
+# An invalid column-list alias is a bind error.
+statement error
+SELECT cache_httpfs_cache_parquet_file('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet', bogus := ['a']);
+----
+must be 'include' or 'exclude'
+
+# --- include a single column ---
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+query I
+SELECT cache_httpfs_cache_parquet_file('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet', ['a']);
+----
+true
+
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+# Reading the warmed column is served from the cache: hits, and no misses.
+statement ok
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet') WHERE a % 2 = 0;
+
+query I
+SELECT cache_hit_count > 0 AND cache_miss_count = 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
+
+# A column that was not warmed misses.
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+statement ok
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet') WHERE b % 2 = 0;
+
+query I
+SELECT cache_miss_count > 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
+
+# --- include := names the same behavior as a bare list ---
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+query I
+SELECT cache_httpfs_cache_parquet_file('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet', include := ['a']);
+----
+true
+
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+statement ok
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet') WHERE a % 2 = 0;
+
+query I
+SELECT cache_hit_count > 0 AND cache_miss_count = 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
+
+# --- exclude := warms everything but the named column ---
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+query I
+SELECT cache_httpfs_cache_parquet_file('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet', exclude := ['b']);
+----
+true
+
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+# A non-excluded column is warm: hits, no misses.
+statement ok
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet') WHERE a % 2 = 0;
+
+query I
+SELECT cache_hit_count > 0 AND cache_miss_count = 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
+
+# The excluded column misses.
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+statement ok
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet') WHERE b % 2 = 0;
+
+query I
+SELECT cache_miss_count > 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
+
+# --- lenient: an unknown include column is ignored, still returns true and warms the matches ---
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+query I
+SELECT cache_httpfs_cache_parquet_file('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet', ['a', 'does_not_exist']);
+----
+true
+
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+statement ok
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet') WHERE a % 2 = 0;
+
+query I
+SELECT cache_hit_count > 0 AND cache_miss_count = 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
