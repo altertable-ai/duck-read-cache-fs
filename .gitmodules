@@ -1,6 +1,6 @@
 [submodule "duckdb"]
 	path = duckdb
-	url = https://github.com/duckdb/duckdb
+	url = https://github.com/altertable-ai/duckdb
 	branch = main
 [submodule "extension-ci-tools"]
 	path = extension-ci-tools
@@ -8,4 +8,4 @@
 	branch = main
 [submodule "duckdb-httpfs"]
 	path = duckdb-httpfs
-	url = https://github.com/duckdb/duckdb-httpfs
+	url = https://github.com/altertable-ai/duckdb-httpfs
