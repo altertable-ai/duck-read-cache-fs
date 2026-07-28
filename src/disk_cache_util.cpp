@@ -266,15 +266,34 @@ void AddChunkedXattrEntries(unordered_map<string, string> &file_attrs, const cha
 	local_filesystem.Read(*file_handle, content.data(), chunk_size, /*location=*/0);
 	content.length = chunk_size;
 
-	// Update access and modification timestamp for the cache file, so it won't get evicted.
-	// Intentionally ignore the return value, since it's possible the cache file has been requested to
-	// delete by another eviction thread.
-	UpdateFileTimestamps(cache_filepath);
-
 	return LocalCacheReadResult {
 	    .cache_hit = true,
 	    .content = std::move(content),
 	};
+}
+
+/*static*/ bool DiskCacheUtil::ReadLocalCacheFileRange(const string &cache_filepath, char *buffer, idx_t bytes_to_read,
+                                                       idx_t location, const string &version_tag) {
+	if (bytes_to_read == 0) {
+		return true;
+	}
+
+	LocalFileSystem local_filesystem {};
+	auto file_handle = local_filesystem.OpenFile(cache_filepath, FileOpenFlags::FILE_FLAGS_READ |
+	                                                                 FileOpenFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
+
+	// Check cache validity and clear if necessary.
+	if (file_handle != nullptr && !ValidateCacheFile(cache_filepath, version_tag)) {
+		local_filesystem.TryRemoveFile(cache_filepath);
+		file_handle = nullptr;
+	}
+
+	if (file_handle == nullptr) {
+		return false;
+	}
+
+	local_filesystem.Read(*file_handle, buffer, /*nr_bytes=*/bytes_to_read, location);
+	return true;
 }
 
 /*static*/ bool DiskCacheUtil::ValidateCacheFile(const string &cache_filepath, const string &version_tag) {

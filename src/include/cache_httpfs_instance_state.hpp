@@ -7,6 +7,7 @@
 #include "base_profile_collector.hpp"
 #include "cache_exclusion_manager.hpp"
 #include "cache_filesystem_config.hpp"
+#include "file_access_timestamp_throttle.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
@@ -206,6 +207,8 @@ struct CacheHttpfsInstanceState : public ObjectCacheEntry {
 	InstanceCacheReaderManager cache_reader_manager;
 	InstanceProfileCollectorManager profile_collector_manager;
 	CacheExclusionManager exclusion_manager;
+	// Throttles cache-file mtime updates used for LRU/staleness eviction.
+	FileAccessTimestampThrottle cache_file_timestamp_throttle;
 
 	CacheHttpfsInstanceState() = default;
 	~CacheHttpfsInstanceState() override;

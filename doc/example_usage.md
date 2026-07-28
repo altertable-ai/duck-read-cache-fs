@@ -28,14 +28,18 @@ D SET cache_httpfs_cache_directories_config='/tmp/duckdb_cache_httpfs_cache_1;/t
 ```
 
 - For the extension, filesystem requests are split into multiple sub-requests and aligned with block size for parallel IO requests and cache efficiency.
-We provide options to tune block size.
+We provide options to tune block size. Large blocks control remote/cache-file granularity (useful for lazy whole-file caching); warm on-disk hits read only the requested local range when the disk-reader memory cache is disabled.
 ```sql
 -- By default block size is 64KiB, here we update it to 4KiB.
 D SET cache_httpfs_cache_block_size=4096;
+-- Example: whole-file remote fetch / one on-disk cache artifact for objects under 8 GiB.
+-- D SET GLOBAL cache_httpfs_cache_block_size=8589934592;
 ```
 
-- Parallel read feature mentioned above is achieved by spawning multiple threads, with users allowed to adjust thread number.
+- Parallel multi-block reads use an executor; prefer DuckDB's task scheduler so `SET threads = N` applies. Single-block reads always run inline (no private one-thread pool).
 ```sql
+-- Recommended for production multi-block fanout.
+D SET GLOBAL cache_httpfs_parallel_read_mode='duckdb_task_scheduler';
 -- By default we don't set any limit for subrequest number, with the new setting 10 requests will be performed at the same time.
 D SET cache_httpfs_max_fanout_subrequest=10;
 ```
@@ -56,7 +60,7 @@ D SELECT * FROM duckdb_settings() WHERE name LIKE 'cache_httpfs%';
 D SELECT * FROM duckdb_functions() WHERE function_name LIKE 'cache_httpfs%';
 ```
 
-- The extension provides LRU-based bufferpool upon disk cache blocks, so users don't need to access storage unless necessary. It's disabled by default, which turns to leverage page cache.
+- The extension provides LRU-based bufferpool upon disk cache blocks, so users don't need to access storage unless necessary. It's disabled by default, which turns to leverage page cache and local range reads from on-disk cache files. When enabled, memory-cache entries are still full blocks, so size the buffer pool as `block_count * cache_block_size`.
 ```sql
 D SET cache_httpfs_disk_cache_reader_enable_memory_cache=true;
 -- The max bufferpool size is `cache_httpfs_disk_cache_reader_mem_cache_block_count` * `cache_httpfs_cache_block_size`, you can tune it via

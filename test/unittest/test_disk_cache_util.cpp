@@ -174,3 +174,99 @@ TEST_CASE("CleanupDeadTempFiles deletes only stale temp files", "[disk_cache_uti
 	REQUIRE(!fs->FileExists(stale_path));
 	REQUIRE(fs->FileExists(fresh_path));
 }
+
+namespace {
+
+string WriteCacheFile(FileSystem &fs, const string &path, const string &content, const string &version_tag = "") {
+	{
+		auto handle = fs.OpenFile(path, FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE_NEW);
+		fs.Write(*handle, const_cast<char *>(content.data()), /*nr_bytes=*/content.size(), /*location=*/0);
+		fs.FileSync(*handle);
+	}
+	if (!version_tag.empty()) {
+		REQUIRE(SetCacheVersion(path, version_tag));
+	}
+	return path;
+}
+
+} // namespace
+
+TEST_CASE("ReadLocalCacheFileRange reads requested offset into caller buffer", "[disk_cache_util]") {
+	const string test_dir =
+	    StringUtil::Format("/tmp/test_disk_cache_util_range_%s", UUID::ToString(UUID::GenerateRandomUUID()));
+	ScopedDirectory dir(test_dir);
+	auto fs = LocalFileSystem::CreateLocal();
+
+	const string content = "abcdefghijklmnopqrstuvwxyz";
+	const string path = WriteCacheFile(*fs, StringUtil::Format("%s/block.bin", test_dir), content, "v1");
+
+	string output(4, '\0');
+	REQUIRE(DiskCacheUtil::ReadLocalCacheFileRange(path, const_cast<char *>(output.data()), /*bytes_to_read=*/4,
+	                                               /*location=*/10, "v1"));
+	REQUIRE(output == "klmn");
+}
+
+TEST_CASE("ReadLocalCacheFileRange supports EOF boundary and empty version tag", "[disk_cache_util]") {
+	const string test_dir =
+	    StringUtil::Format("/tmp/test_disk_cache_util_range_eof_%s", UUID::ToString(UUID::GenerateRandomUUID()));
+	ScopedDirectory dir(test_dir);
+	auto fs = LocalFileSystem::CreateLocal();
+
+	const string content = "0123456789";
+	const string path = WriteCacheFile(*fs, StringUtil::Format("%s/block.bin", test_dir), content, "v1");
+
+	string output(3, '\0');
+	// Empty request version tag disables validation, so a tagged cache file still hits.
+	REQUIRE(DiskCacheUtil::ReadLocalCacheFileRange(path, const_cast<char *>(output.data()), /*bytes_to_read=*/3,
+	                                               /*location=*/7, ""));
+	REQUIRE(output == "789");
+}
+
+TEST_CASE("ReadLocalCacheFileRange deletes mismatched version and returns miss", "[disk_cache_util]") {
+	const string test_dir =
+	    StringUtil::Format("/tmp/test_disk_cache_util_range_mismatch_%s", UUID::ToString(UUID::GenerateRandomUUID()));
+	ScopedDirectory dir(test_dir);
+	auto fs = LocalFileSystem::CreateLocal();
+
+	const string content = "hello-world";
+	const string path = WriteCacheFile(*fs, StringUtil::Format("%s/block.bin", test_dir), content, "v1");
+
+	string output(5, '\0');
+	REQUIRE_FALSE(DiskCacheUtil::ReadLocalCacheFileRange(path, const_cast<char *>(output.data()), /*bytes_to_read=*/5,
+	                                                     /*location=*/0, "v2"));
+	REQUIRE_FALSE(fs->FileExists(path));
+}
+
+TEST_CASE("ReadLocalCacheFileRange returns miss for missing file", "[disk_cache_util]") {
+	string output(4, '\0');
+	REQUIRE_FALSE(DiskCacheUtil::ReadLocalCacheFileRange("/tmp/does-not-exist-cache-httpfs.bin",
+	                                                     const_cast<char *>(output.data()),
+	                                                     /*bytes_to_read=*/4, /*location=*/0, ""));
+}
+
+TEST_CASE("ReadLocalCacheFile no longer updates timestamps on hit", "[disk_cache_util]") {
+	const string test_dir =
+	    StringUtil::Format("/tmp/test_disk_cache_util_no_utime_%s", UUID::ToString(UUID::GenerateRandomUUID()));
+	ScopedDirectory dir(test_dir);
+	auto fs = LocalFileSystem::CreateLocal();
+
+	const string content = "abcdefghijklmnop";
+	const string path = WriteCacheFile(*fs, StringUtil::Format("%s/block.bin", test_dir), content);
+
+	const time_t old_mtime = std::time(nullptr) - 3600;
+	SetFileMtime(path, old_mtime);
+	timestamp_t mtime_before;
+	{
+		auto handle = fs->OpenFile(path, FileOpenFlags::FILE_FLAGS_READ);
+		mtime_before = fs->GetLastModifiedTime(*handle);
+	}
+
+	DiskCacheUtil::ReadOption options;
+	auto result = DiskCacheUtil::ReadLocalCacheFile(path, content.size(), /*version_tag=*/"", options);
+	REQUIRE(result.cache_hit);
+	REQUIRE(result.content.length == content.size());
+
+	auto handle = fs->OpenFile(path, FileOpenFlags::FILE_FLAGS_READ);
+	const auto mtime_after = fs->GetLastModifiedTime(*handle);
+	REQUIRE(mtime_after == mtime_before);
+}

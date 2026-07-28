@@ -42,8 +42,11 @@ Caveat:
 - The extension is implemented for object storage, which is expected to be read-heavy workload and (mostly) immutable, so it only supports read cache (at the moment), cache won't be cleared on write operation for the same object.
   + We provide workaround for overwrite -- user could call `cache_httpfs_clear_cache` to delete all cache content, and `cache_httpfs_clear_cache_for_file` for a certain object.
   + All types of cache provides eventual consistency guarantee, which gets evicted after a tunable timeout.
-- Filesystem requests are split into multiple sub-requests and aligned with block size for parallel IO requests and cache efficiency, so for small requests (i.e. read 1 byte) could suffer read amplification.
-  A workaround for reducing amplification is to tune down block size via `cache_httpfs_cache_block_size` or fallback to native httpfs.
+- Filesystem requests are split into multiple sub-requests and aligned with block size for parallel IO requests and cache efficiency.
+  + `cache_httpfs_cache_block_size` controls remote fetch / on-disk cache-file granularity. Large values (for example whole-file sized blocks) intentionally download and store one cache artifact per object on the first miss.
+  + On warm on-disk hits with the disk-reader memory cache disabled (`cache_httpfs_disk_cache_reader_enable_memory_cache=false`, the default), only the requested byte range is read from the local cache file — small logical reads do not re-read the whole cached object.
+  + When the optional disk-reader memory cache is enabled, blocks are still loaded at full block size into the buffer pool, so memory-cache sizing remains `block_count * cache_block_size`.
+  + Multi-block fanout should use `SET GLOBAL cache_httpfs_parallel_read_mode='duckdb_task_scheduler'` so `SET threads = N` controls parallelism; single-block reads always run inline on the caller thread.
 
 ## Example usage
 ```sql

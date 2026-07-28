@@ -97,8 +97,6 @@ vector<DataCacheEntryInfo> DiskCacheReader::GetCacheEntriesInfo() const {
 
 void DiskCacheReader::ProcessCacheReadChunk(FileHandle &handle, const InstanceConfig &config, const string &version_tag,
                                             CacheReadChunk cache_read_chunk) {
-	SetThreadName("RdCachRdThd");
-
 	auto &cache_handle = handle.Cast<CacheFileSystemHandle>();
 	auto state = instance_state.lock();
 	auto &collector = GetProfileCollectorOrThrow(state, cache_handle.GetConnectionId());
@@ -134,23 +132,40 @@ void DiskCacheReader::ProcessCacheReadChunk(FileHandle &handle, const InstanceCo
 	const bool can_access_cache_file = state->CanAccessFile(cache_dest.dest_local_filepath);
 	if (can_access_cache_file) {
 		const auto latency_guard = collector.RecordOperationStart(IoOperation::kDiskCacheRead);
-		const DiskCacheUtil::ReadOption read_options {
-		    // If on-disk in-memory cache is enabled, use direct IO to avoid double buffering.
-		    // Otherwise, rely on page cache for repeated access.
-		    .attempt_direct_io = config.enable_disk_reader_mem_cache,
-		};
-		auto read_result = DiskCacheUtil::ReadLocalCacheFile(cache_dest.dest_local_filepath,
-		                                                     cache_read_chunk.chunk_size, version_tag, read_options);
-		if (read_result.cache_hit) {
-			collector.RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit, cache_read_chunk.bytes_to_copy);
-			DUCKDB_LOG_READ_CACHE_HIT((handle));
-			cache_read_chunk.CopyBufferToRequestedMemory(read_result.content);
+		bool cache_hit = false;
 
-			// Update in-memory cache if applicable.
-			if (in_mem_storage != nullptr) {
-				in_mem_storage->Put(block_key, std::move(read_result.content), version_tag);
+		if (in_mem_storage == nullptr) {
+			// Disk-only mode: read the requested slice from the whole-file (or block) cache artifact.
+			const idx_t local_offset = cache_read_chunk.requested_start_offset - cache_read_chunk.aligned_start_offset;
+			cache_hit = DiskCacheUtil::ReadLocalCacheFileRange(
+			    cache_dest.dest_local_filepath, cache_read_chunk.requested_start_addr, cache_read_chunk.bytes_to_copy,
+			    local_offset, version_tag);
+			if (cache_hit) {
+				collector.RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit, cache_read_chunk.bytes_to_copy);
+				DUCKDB_LOG_READ_CACHE_HIT((handle));
+				if (state->cache_file_timestamp_throttle.ShouldTouch(cache_dest.dest_local_filepath)) {
+					UpdateFileTimestamps(cache_dest.dest_local_filepath);
+				}
+				return;
 			}
-			return;
+		} else {
+			// Memory-cache mode intentionally needs the full aligned block for Put().
+			const DiskCacheUtil::ReadOption read_options {
+			    .attempt_direct_io = config.enable_disk_reader_mem_cache,
+			};
+			auto read_result = DiskCacheUtil::ReadLocalCacheFile(
+			    cache_dest.dest_local_filepath, cache_read_chunk.chunk_size, version_tag, read_options);
+			cache_hit = read_result.cache_hit;
+			if (cache_hit) {
+				collector.RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit, cache_read_chunk.bytes_to_copy);
+				DUCKDB_LOG_READ_CACHE_HIT((handle));
+				cache_read_chunk.CopyBufferToRequestedMemory(read_result.content);
+				in_mem_storage->Put(block_key, std::move(read_result.content), version_tag);
+				if (state->cache_file_timestamp_throttle.ShouldTouch(cache_dest.dest_local_filepath)) {
+					UpdateFileTimestamps(cache_dest.dest_local_filepath);
+				}
+				return;
+			}
 		}
 	}
 
@@ -212,19 +227,38 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 	};
 	const ChunkAlignmentInfo alignment_info = CalculateChunkAlignment(read_params);
 
-	// Indicate the memory address to copy to for each IO operation
-	char *addr_to_write = buffer;
-	// Used to calculate bytes to copy for last chunk.
-	idx_t already_read_bytes = 0;
-	// Threads to parallelly perform IO.
-
-	const auto task_count = GetThreadCountForSubrequests(alignment_info.subrequest_count, config.max_subrequest_count);
-	auto parallel_executor =
-	    CreateParallelExecutor(instance_state_locked->db_instance, config.parallel_read_mode, task_count);
 	// Get file-level metadata once before processing chunks.
 	const bool enable_cache_validation =
 	    instance_state_locked->ResolveSettingsForPath(handle.GetPath()).enable_cache_validation;
 	string version_tag = enable_cache_validation ? handle.Cast<CacheFileSystemHandle>().GetVersionTag() : "";
+
+	// Single-subrequest reads execute inline to avoid creating a one-thread private pool per logical read.
+	if (alignment_info.subrequest_count == 1) {
+		CacheReadChunk cache_read_chunk;
+		cache_read_chunk.requested_start_addr = buffer;
+		cache_read_chunk.aligned_start_offset = alignment_info.aligned_start_offset;
+		cache_read_chunk.requested_start_offset = requested_start_offset;
+		cache_read_chunk.chunk_size = MinValue<idx_t>(block_size, file_size - alignment_info.aligned_start_offset);
+		cache_read_chunk.bytes_to_copy = requested_bytes_to_read;
+
+		ProcessCacheReadChunk(handle, config, version_tag, cache_read_chunk);
+
+		auto &cache_handle = handle.Cast<CacheFileSystemHandle>();
+		auto state_for_profile = instance_state.lock();
+		auto &collector = GetProfileCollectorOrThrow(state_for_profile, cache_handle.GetConnectionId());
+		collector.RecordActualCacheRead(/*cache_size=*/cache_read_chunk.chunk_size,
+		                                /*actual_bytes=*/requested_bytes_to_read);
+		return;
+	}
+
+	// Indicate the memory address to copy to for each IO operation
+	char *addr_to_write = buffer;
+	// Used to calculate bytes to copy for last chunk.
+	idx_t already_read_bytes = 0;
+
+	const auto task_count = GetThreadCountForSubrequests(alignment_info.subrequest_count, config.max_subrequest_count);
+	auto parallel_executor =
+	    CreateParallelExecutor(instance_state_locked->db_instance, config.parallel_read_mode, task_count);
 
 	// To improve IO performance, we split requested bytes (after alignment) into multiple chunks and fetch them in
 	// parallel.
@@ -246,14 +280,8 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 		// requested start offset might not be aligned with block size; for the last chunk, we might not need to
 		// copy the whole [block_size] of memory.
 		//
-		// Case-1: If there's only one chunk, which serves as both the first chunk and the last one.
-		if (io_start_offset == alignment_info.aligned_start_offset &&
-		    io_start_offset == alignment_info.aligned_last_chunk_offset) {
-			cache_read_chunk.chunk_size = MinValue<idx_t>(block_size, file_size - io_start_offset);
-			cache_read_chunk.bytes_to_copy = requested_bytes_to_read;
-		}
-		// Case-2: First chunk.
-		else if (io_start_offset == alignment_info.aligned_start_offset) {
+		// Case-1: First chunk of a multi-chunk read.
+		if (io_start_offset == alignment_info.aligned_start_offset) {
 			const idx_t delta_offset = requested_start_offset - alignment_info.aligned_start_offset;
 			addr_to_write += block_size - delta_offset;
 			already_read_bytes += block_size - delta_offset;
@@ -261,12 +289,12 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 			cache_read_chunk.chunk_size = block_size;
 			cache_read_chunk.bytes_to_copy = block_size - delta_offset;
 		}
-		// Case-3: Last chunk.
+		// Case-2: Last chunk.
 		else if (io_start_offset == alignment_info.aligned_last_chunk_offset) {
 			cache_read_chunk.chunk_size = MinValue<idx_t>(block_size, file_size - io_start_offset);
 			cache_read_chunk.bytes_to_copy = requested_bytes_to_read - already_read_bytes;
 		}
-		// Case-4: Middle chunks.
+		// Case-3: Middle chunks.
 		else {
 			addr_to_write += block_size;
 			already_read_bytes += block_size;
@@ -281,6 +309,7 @@ void DiskCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t reque
 
 		// Perform read operation in parallel.
 		parallel_executor->Schedule([this, &handle, &config, &version_tag, cache_read_chunk]() {
+			SetThreadName("RdCachRdThd");
 			ProcessCacheReadChunk(handle, config, version_tag, cache_read_chunk);
 		});
 	}
