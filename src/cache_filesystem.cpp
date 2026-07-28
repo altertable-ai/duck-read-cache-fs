@@ -642,6 +642,24 @@ int64_t CacheFileSystem::ReadImpl(FileHandle &handle, void *buffer, int64_t nr_b
 	return bytes_to_read;
 }
 
+void CacheFileSystem::ScheduleWarm(FileHandle &handle, int64_t nr_bytes, idx_t location,
+                                   BaseParallelExecutor &executor) {
+	const auto file_size = GetFileSize(handle);
+
+	if (location >= static_cast<idx_t>(file_size)) {
+		return;
+	}
+
+	auto state = instance_state.lock();
+
+	if (state->exclusion_manager.MatchAnyExclusion(handle.GetPath())) {
+		return;
+	}
+
+	const int64_t bytes_to_warm = MinValue<int64_t>(nr_bytes, file_size - location);
+	state->cache_reader_manager.GetCacheReader()->ScheduleWarm(handle, location, bytes_to_warm, file_size, executor);
+}
+
 void CacheFileSystem::RecordCacheAccess(connection_t conn_id, CacheEntity cache_entity, CacheAccess cache_access) {
 	auto state = instance_state.lock();
 	auto &collector = GetProfileCollectorOrThrow(state, conn_id);

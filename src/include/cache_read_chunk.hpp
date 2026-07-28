@@ -14,6 +14,7 @@ struct PageAlignedDataChunk;
 // A [CacheReadChunk] represents a chunked IO request and its corresponding partial IO request.
 struct CacheReadChunk {
 	// Requested memory address and file offset to read from for current chunk.
+	// A null address marks a cache-warm chunk, which is fetched and cached but copied nowhere.
 	char *requested_start_addr = nullptr;
 	idx_t requested_start_offset = 0;
 	// Block size aligned [requested_start_offset].

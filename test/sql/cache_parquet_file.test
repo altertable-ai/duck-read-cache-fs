@@ -165,3 +165,52 @@ SELECT cache_hit_count > 0 AND cache_miss_count = 0
 FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
 ----
 true
+
+# --- multi-row: both the file and the column list are read per row, not once off the first row ---
+statement ok
+COPY (
+    SELECT i AS id, hash(i) AS a, hash(i * 7) AS b, hash(i * 13) AS c
+    FROM range(100000) t(i)
+) TO '/tmp/cache_httpfs_fake_filesystem/cache_parquet2.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 100000);
+
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+query II
+SELECT id, cache_httpfs_cache_parquet_file(f, include := cols) FROM (VALUES
+    (1, '/tmp/cache_httpfs_fake_filesystem/cache_parquet.parquet', ['a']),
+    (2, '/tmp/cache_httpfs_fake_filesystem/cache_parquet2.parquet', ['b']),
+    (3, '/tmp/cache_httpfs_fake_filesystem/does-not-exist.parquet', ['a']),
+    (4, NULL, ['a'])
+) t(id, f, cols) ORDER BY id;
+----
+1	true
+2	true
+3	false
+4	NULL
+
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+# Row 2's column list was applied to row 2's file: 'b' is warm on the second file.
+statement ok
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/cache_parquet2.parquet') WHERE b % 2 = 0;
+
+query I
+SELECT cache_hit_count > 0 AND cache_miss_count = 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
+
+# ... and only that column list: 'c' on the second file was never warmed.
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+statement ok
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/cache_parquet2.parquet') WHERE c % 2 = 0;
+
+query I
+SELECT cache_miss_count > 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true

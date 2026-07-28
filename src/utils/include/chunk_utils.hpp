@@ -5,6 +5,8 @@
 #include "cache_read_chunk.hpp"
 #include "duckdb/common/typedefs.hpp"
 
+#include <functional>
+
 namespace duckdb {
 
 // Parameters for a read request.
@@ -29,5 +31,8 @@ struct ChunkAlignmentInfo {
 
 // Calculate chunk alignment information for a read request.
 ChunkAlignmentInfo CalculateChunkAlignment(const ReadRequestParams &params);
+
+idx_t ForEachCacheReadChunk(const ReadRequestParams &params, idx_t file_size, char *buffer,
+                            const std::function<void(const CacheReadChunk &)> &chunk_callback);
 
 } // namespace duckdb

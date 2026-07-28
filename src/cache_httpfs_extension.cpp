@@ -29,6 +29,8 @@
 #include "fake_filesystem.hpp"
 #include "filesystem_status_query_function.hpp"
 #include "hffs.hpp"
+#include "utils/include/parallel_executor.hpp"
+#include "utils/include/thread_utils.hpp"
 #include "httpfs_extension.hpp"
 #include "s3fs.hpp"
 #include "yyjson.hpp"
@@ -104,53 +106,149 @@ void ClearCacheForFile(const DataChunk &args, ExpressionState &state, Vector &re
 	result.Reference(Value(SUCCESS));
 }
 
-void WarmRange(CacheFileSystem &target, FileHandle &handle, idx_t offset, idx_t length, idx_t block_size) {
-	constexpr idx_t WARM_WINDOW_BYTES = 32ULL << 20; // 32 MiB.
-	const idx_t blocks_per_window = MaxValue<idx_t>(1, WARM_WINDOW_BYTES / block_size);
-	const idx_t window = blocks_per_window * block_size;
-	const idx_t end = offset + length;
-
-	vector<char> scratch(window);
-	for (idx_t pos = offset; pos < end; pos += window) {
-		const idx_t bytes_to_read = MinValue<idx_t>(window, end - pos);
-		target.Read(handle, scratch.data(), NumericCast<int64_t>(bytes_to_read), pos);
+CacheFileSystem *GetCacheFsForFile(CacheHttpfsInstanceState &inst_state, const string &filepath, FileOpener *opener) {
+	for (auto *cur_cache_fs : inst_state.registry.GetAllCacheFs()) {
+		if (cur_cache_fs->CanHandleFile(filepath)) {
+			return cur_cache_fs->FileExists(filepath, opener) ? cur_cache_fs : nullptr;
+		}
 	}
+	return nullptr;
 }
 
-// Pre-populate the cache for the given remote file. Returns TRUE on success, FALSE if the file doesn't exist or its
-// filesystem isn't wrapped by the cache.
+struct WarmFile {
+	CacheFileSystem *fs = nullptr;
+	unique_ptr<FileHandle> handle;
+	idx_t file_size = 0;
+};
+
+struct WarmRange {
+	WarmFile *file;
+	idx_t offset;
+	idx_t length;
+};
+
+unique_ptr<BaseParallelExecutor> CreateWarmExecutor(CacheHttpfsInstanceState &inst_state, idx_t task_count) {
+	return CreateParallelExecutor(inst_state.db_instance, ParallelExecutorMode::DUCKDB_TASK_SCHEDULER,
+	                              MaxValue<idx_t>(1, MinValue<idx_t>(task_count, GetCpuCoreCount())));
+}
+
+// Locate every path concurrently: pick the cache filesystem that handles it and confirm it exists.
+vector<WarmFile> LocateWarmFiles(CacheHttpfsInstanceState &inst_state, FileOpener &opener,
+                                 const vector<string> &filepaths) {
+	vector<WarmFile> files(filepaths.size());
+	if (filepaths.empty()) {
+		return files;
+	}
+
+	auto executor = CreateWarmExecutor(inst_state, filepaths.size());
+	for (idx_t i = 0; i < filepaths.size(); ++i) {
+		executor->Schedule([&inst_state, &opener, &filepaths, &files, i]() {
+			files[i].fs = GetCacheFsForFile(inst_state, filepaths[i], &opener);
+		});
+	}
+	executor->WaitAll();
+
+	return files;
+}
+
+// Open and stat every located file concurrently. Must run after any nested query over the same paths, see
+// LocateWarmFiles.
+void OpenWarmFiles(CacheHttpfsInstanceState &inst_state, FileOpener &opener, const vector<string> &filepaths,
+                   vector<WarmFile> &files) {
+	if (filepaths.empty()) {
+		return;
+	}
+
+	auto executor = CreateWarmExecutor(inst_state, filepaths.size());
+	for (idx_t i = 0; i < filepaths.size(); ++i) {
+		if (files[i].fs == nullptr) {
+			continue;
+		}
+		executor->Schedule([&opener, &filepaths, &files, i]() {
+			auto handle = files[i].fs->OpenFile(filepaths[i], FileOpenFlags::FILE_FLAGS_READ, &opener);
+			files[i].file_size = NumericCast<idx_t>(files[i].fs->GetFileSize(*handle));
+			files[i].handle = std::move(handle);
+		});
+	}
+	executor->WaitAll();
+}
+
+void WarmRanges(CacheHttpfsInstanceState &inst_state, const vector<WarmRange> &ranges) {
+	if (ranges.empty()) {
+		return;
+	}
+
+	const idx_t block_size = inst_state.config.cache_block_size;
+	idx_t total_blocks = 0;
+	for (const auto &range : ranges) {
+		total_blocks += range.length / block_size + 1;
+	}
+
+	auto executor = CreateWarmExecutor(inst_state, total_blocks);
+	for (const auto &range : ranges) {
+		range.file->fs->ScheduleWarm(*range.file->handle, NumericCast<int64_t>(range.length), range.offset, *executor);
+	}
+	executor->WaitAll();
+}
+
+struct RowPaths {
+	vector<string> distinct_paths;
+	vector<idx_t> row_to_path;
+};
+
+RowPaths CollectRowPaths(const DataChunk &args, ValidityMask &result_validity) {
+	RowPaths row_paths;
+	unordered_map<string, idx_t> path_to_index;
+
+	for (idx_t row = 0; row < args.size(); ++row) {
+		const Value path_value = args.GetValue(/*col_idx=*/0, row);
+		if (path_value.IsNull()) {
+			result_validity.SetInvalid(row);
+			row_paths.row_to_path.push_back(DConstants::INVALID_INDEX);
+			continue;
+		}
+
+		const string filepath = StringValue::Get(path_value);
+		auto emplaced = path_to_index.emplace(filepath, row_paths.distinct_paths.size());
+		if (emplaced.second) {
+			row_paths.distinct_paths.push_back(filepath);
+		}
+		row_paths.row_to_path.push_back(emplaced.first->second);
+	}
+
+	return row_paths;
+}
+
 void CacheFile(const DataChunk &args, ExpressionState &state, Vector &result) {
 	ALWAYS_ASSERT(args.ColumnCount() == 1);
-	const string filepath = args.GetValue(/*col_idx=*/0, /*index=*/0).ToString();
 
 	auto &instance = GetDatabaseInstance(state);
 	auto &inst_state = GetInstanceStateOrThrow(instance);
-
-	CacheFileSystem *target = nullptr;
-	for (auto *cur_cache_fs : inst_state.registry.GetAllCacheFs()) {
-		if (cur_cache_fs->CanHandleFile(filepath)) {
-			target = cur_cache_fs;
-			break;
-		}
-	}
-	if (target == nullptr) {
-		result.Reference(Value(false));
-		return;
-	}
-
 	auto &client_context = state.root.executor->GetContext();
 	ClientContextFileOpener opener(client_context);
 
-	if (!target->FileExists(filepath, &opener)) {
-		result.Reference(Value(false));
-		return;
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto result_data = FlatVector::GetData<bool>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	const RowPaths row_paths = CollectRowPaths(args, result_validity);
+	auto files = LocateWarmFiles(inst_state, opener, row_paths.distinct_paths);
+	OpenWarmFiles(inst_state, opener, row_paths.distinct_paths, files);
+
+	vector<WarmRange> ranges;
+	for (auto &file : files) {
+		if (file.fs != nullptr && file.file_size > 0) {
+			ranges.push_back(WarmRange {&file, /*offset=*/0, /*length=*/file.file_size});
+		}
 	}
+	WarmRanges(inst_state, ranges);
 
-	auto handle = target->OpenFile(filepath, FileOpenFlags::FILE_FLAGS_READ, &opener);
-	const idx_t file_size = NumericCast<idx_t>(target->GetFileSize(*handle));
-
-	WarmRange(*target, *handle, /*offset=*/0, /*length=*/file_size, inst_state.config.cache_block_size);
-	result.Reference(Value(true));
+	for (idx_t row = 0; row < args.size(); ++row) {
+		const idx_t path_index = row_paths.row_to_path[row];
+		if (path_index != DConstants::INVALID_INDEX) {
+			result_data[row] = files[path_index].fs != nullptr;
+		}
+	}
 }
 
 struct CacheParquetBindData : public FunctionData {
@@ -178,79 +276,65 @@ unique_ptr<FunctionData> CacheParquetFileBind(ClientContext &context, ScalarFunc
 	return std::move(bind_data);
 }
 
-void CacheParquetFile(const DataChunk &args, ExpressionState &state, Vector &result) {
-	ALWAYS_ASSERT(args.ColumnCount() == 2);
-	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	const bool is_exclude = func_expr.bind_info->Cast<CacheParquetBindData>().is_exclude;
+struct ParquetColumnChunk {
+	string top_level_column;
+	idx_t start = 0;
+	idx_t end = 0;
+};
 
-	const string filepath = args.GetValue(/*col_idx=*/0, /*index=*/0).ToString();
-
-	case_insensitive_set_t requested_columns;
-	const Value column_list = args.GetValue(/*col_idx=*/1, /*index=*/0);
-	if (!column_list.IsNull()) {
-		for (const auto &col : ListValue::GetChildren(column_list)) {
-			if (!col.IsNull()) {
-				requested_columns.insert(StringValue::Get(col));
-			}
-		}
-	}
-
-	auto &instance = GetDatabaseInstance(state);
-	auto &inst_state = GetInstanceStateOrThrow(instance);
-
-	CacheFileSystem *target = nullptr;
-	for (auto *cur_cache_fs : inst_state.registry.GetAllCacheFs()) {
-		if (cur_cache_fs->CanHandleFile(filepath)) {
-			target = cur_cache_fs;
-			break;
-		}
-	}
-	if (target == nullptr) {
-		result.Reference(Value(false));
-		return;
-	}
-
-	auto &client_context = state.root.executor->GetContext();
-	ClientContextFileOpener opener(client_context);
-
-	if (!target->FileExists(filepath, &opener)) {
-		result.Reference(Value(false));
-		return;
-	}
-
+unordered_map<string, vector<ParquetColumnChunk>> ReadParquetLayouts(DatabaseInstance &instance,
+                                                                     const vector<string> &filepaths) {
 	Connection con(instance);
-	const string escaped_filepath = StringUtil::Replace(filepath, "'", "''");
-	auto metadata = con.Query(StringUtil::Format("SELECT path_in_schema, data_page_offset, dictionary_page_offset, "
-	                                             "total_compressed_size FROM parquet_metadata('%s')",
-	                                             escaped_filepath));
-	if (metadata->HasError()) {
-		// The file exists but can't be read as parquet (not a parquet file, an IO error, or the parquet extension is
-		// unavailable). Surface the underlying error rather than silently returning false.
-		metadata->ThrowError("cache_httpfs_cache_parquet_file failed to read parquet metadata: ");
+	vector<Value> filepath_values;
+	filepath_values.reserve(filepaths.size());
+	for (const auto &filepath : filepaths) {
+		filepath_values.emplace_back(filepath);
 	}
 
-	vector<pair<idx_t, idx_t>> ranges;
-	for (idx_t row = 0; row < metadata->RowCount(); ++row) {
-		const string path_in_schema = metadata->GetValue(/*column=*/0, row).ToString();
-		// Top-level column name (parquet leaves of nested columns share a dotted prefix).
-		const string top_level = path_in_schema.substr(0, path_in_schema.find('.'));
-		const bool wanted = requested_columns.find(top_level) != requested_columns.end();
-		if (is_exclude ? wanted : !wanted) {
-			continue;
-		}
+	auto statement = con.Prepare("SELECT file_name, path_in_schema, data_page_offset, dictionary_page_offset, "
+	                             "total_compressed_size FROM parquet_metadata($1)");
+	if (statement->HasError()) {
+		statement->GetErrorObject().Throw("cache_httpfs_cache_parquet_file failed to read parquet metadata: ");
+	}
+	vector<Value> params;
+	params.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(filepath_values)));
+	auto result = statement->Execute(params, /*allow_stream_result=*/false);
+	if (result->HasError()) {
+		result->ThrowError("cache_httpfs_cache_parquet_file failed to read parquet metadata: ");
+	}
+	auto &metadata = result->Cast<MaterializedQueryResult>();
 
-		const auto data_page_offset = NumericCast<idx_t>(metadata->GetValue(/*column=*/1, row).GetValue<int64_t>());
-		const Value dictionary_page_offset = metadata->GetValue(/*column=*/2, row);
+	unordered_map<string, vector<ParquetColumnChunk>> layouts;
+	for (idx_t row = 0; row < metadata.RowCount(); ++row) {
+		const string file_name = metadata.GetValue(/*column=*/0, row).ToString();
+		const string path_in_schema = metadata.GetValue(/*column=*/1, row).ToString();
+
+		const auto data_page_offset = NumericCast<idx_t>(metadata.GetValue(/*column=*/2, row).GetValue<int64_t>());
+		const Value dictionary_page_offset = metadata.GetValue(/*column=*/3, row);
 		idx_t start = data_page_offset;
 		if (!dictionary_page_offset.IsNull() && dictionary_page_offset.GetValue<int64_t>() > 0) {
 			start = NumericCast<idx_t>(dictionary_page_offset.GetValue<int64_t>());
 		}
-		const auto total_compressed_size =
-		    NumericCast<idx_t>(metadata->GetValue(/*column=*/3, row).GetValue<int64_t>());
-		ranges.emplace_back(start, start + total_compressed_size);
+		const auto total_compressed_size = NumericCast<idx_t>(metadata.GetValue(/*column=*/4, row).GetValue<int64_t>());
+
+		layouts[file_name].push_back(ParquetColumnChunk {path_in_schema.substr(0, path_in_schema.find('.')), start,
+		                                                 start + total_compressed_size});
 	}
 
-	// Coalesce overlapping / adjacent ranges to bound the number of Read calls on files with many row groups.
+	return layouts;
+}
+
+vector<pair<idx_t, idx_t>> SelectParquetRanges(const vector<ParquetColumnChunk> &layout,
+                                               const case_insensitive_set_t &requested_columns, bool is_exclude) {
+	vector<pair<idx_t, idx_t>> ranges;
+	for (const auto &column_chunk : layout) {
+		const bool wanted = requested_columns.find(column_chunk.top_level_column) != requested_columns.end();
+		if (is_exclude ? wanted : !wanted) {
+			continue;
+		}
+		ranges.emplace_back(column_chunk.start, column_chunk.end);
+	}
+
 	std::sort(ranges.begin(), ranges.end());
 	vector<pair<idx_t, idx_t>> merged;
 	for (const auto &range : ranges) {
@@ -261,13 +345,76 @@ void CacheParquetFile(const DataChunk &args, ExpressionState &state, Vector &res
 		}
 	}
 
-	auto handle = target->OpenFile(filepath, FileOpenFlags::FILE_FLAGS_READ, &opener);
-	const idx_t block_size = inst_state.config.cache_block_size;
-	for (const auto &range : merged) {
-		WarmRange(*target, *handle, range.first, range.second - range.first, block_size);
+	return merged;
+}
+
+void CacheParquetFile(const DataChunk &args, ExpressionState &state, Vector &result) {
+	ALWAYS_ASSERT(args.ColumnCount() == 2);
+	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	const bool is_exclude = func_expr.bind_info->Cast<CacheParquetBindData>().is_exclude;
+
+	auto &instance = GetDatabaseInstance(state);
+	auto &inst_state = GetInstanceStateOrThrow(instance);
+	auto &client_context = state.root.executor->GetContext();
+	ClientContextFileOpener opener(client_context);
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto result_data = FlatVector::GetData<bool>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	const RowPaths row_paths = CollectRowPaths(args, result_validity);
+	auto files = LocateWarmFiles(inst_state, opener, row_paths.distinct_paths);
+
+	// Only files that resolved can be read as parquet; the rest already answer FALSE.
+	vector<string> readable_paths;
+	for (idx_t i = 0; i < files.size(); ++i) {
+		if (files[i].fs != nullptr) {
+			readable_paths.push_back(row_paths.distinct_paths[i]);
+		}
+	}
+	const auto layouts = readable_paths.empty() ? unordered_map<string, vector<ParquetColumnChunk>> {}
+	                                            : ReadParquetLayouts(instance, readable_paths);
+
+	// Safe to hold handles open only now that the nested metadata query is done.
+	OpenWarmFiles(inst_state, opener, row_paths.distinct_paths, files);
+
+	vector<WarmRange> ranges;
+	unordered_set<string> scheduled;
+	for (idx_t row = 0; row < args.size(); ++row) {
+		const idx_t path_index = row_paths.row_to_path[row];
+		if (path_index == DConstants::INVALID_INDEX) {
+			continue;
+		}
+		auto &file = files[path_index];
+		result_data[row] = file.fs != nullptr;
+		if (file.fs == nullptr) {
+			continue;
+		}
+
+		const Value column_list = args.GetValue(/*col_idx=*/1, row);
+		if (!scheduled.emplace(column_list.ToSQLString() + '\0' + row_paths.distinct_paths[path_index]).second) {
+			continue;
+		}
+
+		case_insensitive_set_t requested_columns;
+		if (!column_list.IsNull()) {
+			for (const auto &col : ListValue::GetChildren(column_list)) {
+				if (!col.IsNull()) {
+					requested_columns.insert(StringValue::Get(col));
+				}
+			}
+		}
+
+		auto layout_it = layouts.find(row_paths.distinct_paths[path_index]);
+		if (layout_it == layouts.end()) {
+			continue;
+		}
+		for (const auto &range : SelectParquetRanges(layout_it->second, requested_columns, is_exclude)) {
+			ranges.push_back(WarmRange {&file, range.first, range.second - range.first});
+		}
 	}
 
-	result.Reference(Value(true));
+	WarmRanges(inst_state, ranges);
 }
 
 // Clean up dead temporary cache files (creation time older than 10 minutes). Returns the number of files deleted.
@@ -1078,6 +1225,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	ScalarFunction cache_file_function("cache_httpfs_cache_file",
 	                                   /*arguments=*/ {LogicalType {LogicalTypeId::VARCHAR}},
 	                                   /*return_type=*/LogicalType {LogicalTypeId::BOOLEAN}, CacheFile);
+	cache_file_function.SetVolatile();
 	loader.RegisterFunction(cache_file_function);
 
 	// Register a function to pre-populate the cache for a subset of a parquet file's columns. The column list argument
@@ -1086,6 +1234,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	    "cache_httpfs_cache_parquet_file",
 	    /*arguments=*/ {LogicalType {LogicalTypeId::VARCHAR}, LogicalType::LIST(LogicalType::VARCHAR)},
 	    /*return_type=*/LogicalType {LogicalTypeId::BOOLEAN}, CacheParquetFile, CacheParquetFileBind);
+	cache_parquet_file_function.SetVolatile();
 	loader.RegisterFunction(cache_parquet_file_function);
 
 	// Register a function to wrap all duckdb-vfs-compatible filesystems. By default only httpfs filesystem instances

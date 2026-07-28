@@ -56,3 +56,36 @@ FROM cache_httpfs_cache_access_info_query()
 WHERE cache_type = 'data';
 ----
 true
+
+# The function is evaluated per row, not once per chunk off the first row.
+
+statement ok
+COPY (SELECT i AS id FROM range(20000) t(i)) TO '/tmp/cache_httpfs_fake_filesystem/cache_file_multi_a.csv' (FORMAT CSV);
+
+statement ok
+COPY (SELECT i AS id FROM range(20000) t(i)) TO '/tmp/cache_httpfs_fake_filesystem/cache_file_multi_b.csv' (FORMAT CSV);
+
+statement ok
+SELECT cache_httpfs_wrap_cache_filesystem('cache_httpfs_fake_filesystem');
+
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+query II
+SELECT id, cache_httpfs_cache_file(f) FROM (VALUES
+    (1, '/tmp/cache_httpfs_fake_filesystem/cache_file_multi_a.csv'),
+    (2, '/tmp/cache_httpfs_fake_filesystem/cache_file_multi_b.csv'),
+    (3, '/tmp/cache_httpfs_fake_filesystem/does-not-exist.csv'),
+    (4, NULL)
+) t(id, f) ORDER BY id;
+----
+1	true
+2	true
+3	false
+4	NULL
+
+# Both files were warmed, not just the one on the first row.
+query I
+SELECT COUNT(DISTINCT original_remote_path) FROM cache_httpfs_cache_status_query();
+----
+2

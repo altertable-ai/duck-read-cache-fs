@@ -27,6 +27,10 @@ public:
 	void ReadAndCache(FileHandle &handle, char *buffer, idx_t requested_start_offset, idx_t requested_bytes_to_read,
 	                  idx_t file_size) override;
 
+	void ScheduleWarm(FileHandle & /*handle*/, idx_t /*requested_start_offset*/, idx_t /*requested_bytes_to_read*/,
+	                  idx_t /*file_size*/, BaseParallelExecutor & /*executor*/) override {
+	}
+
 	vector<DataCacheEntryInfo> GetCacheEntriesInfo() const override {
 		return {};
 	}

@@ -16,6 +16,7 @@ namespace duckdb {
 
 // Forward declaration.
 struct CacheHttpfsInstanceState;
+class BaseParallelExecutor;
 
 class BaseCacheReader {
 public:
@@ -30,6 +31,15 @@ public:
 	// user.
 	virtual void ReadAndCache(FileHandle &handle, char *buffer, idx_t requested_start_offset,
 	                          idx_t requested_bytes_to_read, idx_t file_size) = 0;
+
+	// Populate the cache for [requested_start_offset, +requested_bytes_to_read) of [handle] without returning any data,
+	// by scheduling one task per cache block onto [executor].
+	//
+	// Unlike ReadAndCache this does not wait: the caller owns [executor] and is responsible for calling WaitAll(). That
+	// lets a caller warming many files fan every block of every file onto a single executor, rather than serializing
+	// one self-contained parallel read after another. [handle] must outlive that WaitAll() call.
+	virtual void ScheduleWarm(FileHandle &handle, idx_t requested_start_offset, idx_t requested_bytes_to_read,
+	                          idx_t file_size, BaseParallelExecutor &executor) = 0;
 
 	// Get status information for all cache entries for the current cache reader. Entries are returned in a random
 	// order.

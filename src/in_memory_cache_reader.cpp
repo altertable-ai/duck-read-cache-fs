@@ -87,12 +87,9 @@ void InMemoryCacheReader::ProcessCacheReadChunk(FileHandle &handle, const string
 	storage->Put(std::move(block_key), std::move(content), version_tag);
 }
 
-void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t requested_start_offset,
-                                       idx_t requested_bytes_to_read, idx_t file_size) {
-	if (requested_bytes_to_read == 0) {
-		return;
-	}
-
+idx_t InMemoryCacheReader::ScheduleChunks(FileHandle &handle, char *buffer, idx_t requested_start_offset,
+                                          idx_t requested_bytes_to_read, idx_t file_size,
+                                          BaseParallelExecutor &executor) {
 	auto state = instance_state.lock();
 	const auto config = GetConfig(*state);
 
@@ -101,90 +98,71 @@ void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t r
 		                                        config.max_cache_block_count, config.cache_block_timeout_millisec);
 	});
 
-	const idx_t block_size = config.cache_block_size;
 	const ReadRequestParams read_params {
 	    .requested_start_offset = requested_start_offset,
 	    .requested_bytes_to_read = requested_bytes_to_read,
-	    .block_size = block_size,
+	    .block_size = config.cache_block_size,
 	};
 
-	const ChunkAlignmentInfo alignment_info = CalculateChunkAlignment(read_params);
+	// Get file-level metadata once before processing chunks.
+	const bool enable_cache_validation = state->ResolveSettingsForPath(handle.GetPath()).enable_cache_validation;
+	auto version_tag =
+	    make_shared_ptr<string>(enable_cache_validation ? handle.Cast<CacheFileSystemHandle>().GetVersionTag() : "");
 
-	// Indicate the memory address to copy to for each IO operation
-	char *addr_to_write = buffer;
-	// Used to calculate bytes to copy for last chunk.
-	idx_t already_read_bytes = 0;
+	// To improve IO performance, we split requested bytes (after alignment) into multiple chunks and fetch them in
+	// parallel. The instance state is captured into each task so it stays alive until the executor drains, which for a
+	// warm request outlives this call.
+	return ForEachCacheReadChunk(
+	    read_params, file_size, buffer,
+	    [this, &handle, &executor, state, version_tag](const CacheReadChunk &cache_read_chunk) {
+		    executor.Schedule([this, &handle, state, version_tag, cache_read_chunk]() {
+			    ProcessCacheReadChunk(handle, *version_tag, cache_read_chunk);
+		    });
+	    });
+}
+
+void InMemoryCacheReader::ReadAndCache(FileHandle &handle, char *buffer, idx_t requested_start_offset,
+                                       idx_t requested_bytes_to_read, idx_t file_size) {
+	if (requested_bytes_to_read == 0) {
+		return;
+	}
+
+	auto state = instance_state.lock();
+	const auto config = GetConfig(*state);
+	const ReadRequestParams read_params {
+	    .requested_start_offset = requested_start_offset,
+	    .requested_bytes_to_read = requested_bytes_to_read,
+	    .block_size = config.cache_block_size,
+	};
+	const ChunkAlignmentInfo alignment_info = CalculateChunkAlignment(read_params);
 
 	// Threads to parallelly perform IO.
 	const auto task_count = GetThreadCountForSubrequests(alignment_info.subrequest_count, config.max_subrequest_count);
 	auto parallel_executor = CreateParallelExecutor(state->db_instance, state->config.parallel_read_mode, task_count);
-	// Get file-level metadata once before processing chunks.
-	const bool enable_cache_validation = state->ResolveSettingsForPath(handle.GetPath()).enable_cache_validation;
-	string version_tag = enable_cache_validation ? handle.Cast<CacheFileSystemHandle>().GetVersionTag() : "";
 
-	// To improve IO performance, we split requested bytes (after alignment) into multiple chunks and fetch them in
-	// parallel.
-	idx_t total_bytes_to_cache = 0;
-	for (idx_t io_start_offset = alignment_info.aligned_start_offset;
-	     io_start_offset <= alignment_info.aligned_last_chunk_offset; io_start_offset += block_size) {
-		// No bytes to read for the last chunk.
-		if (io_start_offset == file_size) {
-			continue;
-		}
-
-		CacheReadChunk cache_read_chunk;
-		cache_read_chunk.requested_start_addr = addr_to_write;
-		cache_read_chunk.aligned_start_offset = io_start_offset;
-		cache_read_chunk.requested_start_offset = requested_start_offset;
-
-		// Implementation-wise, middle chunks are easy to handle -- read in [block_size], and copy the whole chunk to
-		// the requested memory address; but the first and last chunk require special handling.
-		// For first chunk, requested start offset might not be aligned with block size; for the last chunk, we might
-		// not need to copy the whole [block_size] of memory.
-		//
-		// Case-1: If there's only one chunk, which serves as both the first chunk and the last one.
-		if (io_start_offset == alignment_info.aligned_start_offset &&
-		    io_start_offset == alignment_info.aligned_last_chunk_offset) {
-			cache_read_chunk.chunk_size = MinValue<idx_t>(block_size, file_size - io_start_offset);
-			cache_read_chunk.bytes_to_copy = requested_bytes_to_read;
-		}
-		// Case-2: First chunk.
-		else if (io_start_offset == alignment_info.aligned_start_offset) {
-			const idx_t delta_offset = requested_start_offset - alignment_info.aligned_start_offset;
-			addr_to_write += block_size - delta_offset;
-			already_read_bytes += block_size - delta_offset;
-
-			cache_read_chunk.chunk_size = block_size;
-			cache_read_chunk.bytes_to_copy = block_size - delta_offset;
-		}
-		// Case-3: Last chunk.
-		else if (io_start_offset == alignment_info.aligned_last_chunk_offset) {
-			cache_read_chunk.chunk_size = MinValue<idx_t>(block_size, file_size - io_start_offset);
-			cache_read_chunk.bytes_to_copy = requested_bytes_to_read - already_read_bytes;
-		}
-		// Case-4: Middle chunks.
-		else {
-			addr_to_write += block_size;
-			already_read_bytes += block_size;
-
-			cache_read_chunk.bytes_to_copy = block_size;
-			cache_read_chunk.chunk_size = block_size;
-		}
-		total_bytes_to_cache += cache_read_chunk.chunk_size;
-
-		// Update read offset for next chunk read.
-		requested_start_offset = io_start_offset + block_size;
-
-		// Perform read operation in parallel.
-		parallel_executor->Schedule([this, &handle, &version_tag, cache_read_chunk]() {
-			ProcessCacheReadChunk(handle, version_tag, cache_read_chunk);
-		});
-	}
+	const idx_t total_bytes_to_cache =
+	    ScheduleChunks(handle, buffer, requested_start_offset, requested_bytes_to_read, file_size, *parallel_executor);
 
 	// Block wait for all IO operations to complete.
 	parallel_executor->WaitAll();
 
 	// Record "bytes to read" and "bytes to cache".
+	auto &cache_handle_for_profile = handle.Cast<CacheFileSystemHandle>();
+	auto state_for_profile = instance_state.lock();
+	auto &collector = GetProfileCollectorOrThrow(state_for_profile, cache_handle_for_profile.GetConnectionId());
+	collector.RecordActualCacheRead(/*cache_size=*/total_bytes_to_cache,
+	                                /*actual_bytes=*/requested_bytes_to_read);
+}
+
+void InMemoryCacheReader::ScheduleWarm(FileHandle &handle, idx_t requested_start_offset, idx_t requested_bytes_to_read,
+                                       idx_t file_size, BaseParallelExecutor &executor) {
+	if (requested_bytes_to_read == 0) {
+		return;
+	}
+
+	const idx_t total_bytes_to_cache = ScheduleChunks(handle, /*buffer=*/nullptr, requested_start_offset,
+	                                                  requested_bytes_to_read, file_size, executor);
+
 	auto &cache_handle_for_profile = handle.Cast<CacheFileSystemHandle>();
 	auto state_for_profile = instance_state.lock();
 	auto &collector = GetProfileCollectorOrThrow(state_for_profile, cache_handle_for_profile.GetConnectionId());

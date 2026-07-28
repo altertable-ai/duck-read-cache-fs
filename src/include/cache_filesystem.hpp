@@ -80,6 +80,10 @@ public:
 
 	// Doesn't update file offset (which acts as `PRead` semantics).
 	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
+	// Populate the data cache for [location, +nr_bytes) of [handle] without returning the data, by scheduling one task
+	// per cache block onto [executor]. Does not wait: the caller owns [executor] and must call WaitAll(), and must keep
+	// [handle] alive until then. Lets a caller warming many files fan every block of every file onto one executor.
+	void ScheduleWarm(FileHandle &handle, int64_t nr_bytes, idx_t location, BaseParallelExecutor &executor);
 	// Does update file offset (which acts as `Read` semantics).
 	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
 	unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,

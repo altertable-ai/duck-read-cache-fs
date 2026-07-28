@@ -45,6 +45,7 @@ unique_ptr<BaseParallelExecutor> CreateParallelExecutor(optional_ptr<DatabaseIns
 	if (db && mode == ParallelExecutorMode::DUCKDB_TASK_SCHEDULER) {
 		return make_uniq<DuckDBTaskParallelExecutor>(*db);
 	}
+
 	return make_uniq<ThreadPoolParallelExecutor>(thread_count);
 }
 

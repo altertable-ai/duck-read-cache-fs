@@ -1,0 +1,170 @@
+# name: test/sql/cache_file_parallel.test
+# description: cache_httpfs_cache_file warms many files in one flat fan-out, under both parallel read modes
+# group: [sql]
+
+require notwindows
+
+require parquet
+
+require cache_httpfs
+
+statement ok
+SET cache_httpfs_type='in_mem';
+
+statement ok
+SET cache_httpfs_profile_type='temp';
+
+statement ok
+SET cache_httpfs_max_in_mem_cache_block_count=8192;
+
+# Small blocks so each file spans several cache blocks, and the flat fan-out has real work per file to interleave.
+statement ok
+SET cache_httpfs_cache_block_size=4096;
+
+statement ok
+SELECT cache_httpfs_wrap_cache_filesystem('cache_httpfs_fake_filesystem');
+
+# 12 distinct files, each a few cache blocks wide.
+statement ok
+COPY (
+    SELECT
+        i % 12 AS part,
+        hash(i) AS payload
+    FROM range(60000) t(i)
+) TO '/tmp/cache_httpfs_fake_filesystem/warm_many' (FORMAT PARQUET, PARTITION_BY part, OVERWRITE_OR_IGNORE);
+
+statement ok
+CREATE TABLE warm_manifest AS
+SELECT '/tmp/cache_httpfs_fake_filesystem/warm_many/part=' || p || '/data_0.parquet' AS data_file
+FROM range(12) t(p);
+
+# --- internal_thread_pool (default) ---
+statement ok
+SET cache_httpfs_parallel_read_mode='internal_thread_pool';
+
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE warmed) FROM (
+    SELECT cache_httpfs_cache_file(data_file) AS warmed FROM warm_manifest
+);
+----
+12	12
+
+# Every file was warmed, not just the first of the chunk.
+query I
+SELECT COUNT(DISTINCT original_remote_path) FROM cache_httpfs_cache_status_query();
+----
+12
+
+# Reading them all back is served entirely from the warmed cache.
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+query I
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/warm_many/*/*.parquet');
+----
+60000
+
+query I
+SELECT cache_hit_count > 0 AND cache_miss_count = 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
+
+# --- duckdb_task_scheduler: warming must schedule onto duckdb's task slots just as correctly ---
+statement ok
+SET cache_httpfs_parallel_read_mode='duckdb_task_scheduler';
+
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE warmed) FROM (
+    SELECT cache_httpfs_cache_file(data_file) AS warmed FROM warm_manifest
+);
+----
+12	12
+
+query I
+SELECT COUNT(DISTINCT original_remote_path) FROM cache_httpfs_cache_status_query();
+----
+12
+
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+query I
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/warm_many/*/*.parquet');
+----
+60000
+
+query I
+SELECT cache_hit_count > 0 AND cache_miss_count = 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
+
+# --- the same, for the parquet column-subset variant: one metadata query covers all 12 files ---
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE warmed) FROM (
+    SELECT cache_httpfs_cache_parquet_file(data_file, ['payload']) AS warmed FROM warm_manifest
+);
+----
+12	12
+
+query I
+SELECT COUNT(DISTINCT original_remote_path) FROM cache_httpfs_cache_status_query();
+----
+12
+
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+query I
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/warm_many/*/*.parquet') WHERE payload % 2 = 0;
+----
+30364
+
+query I
+SELECT cache_hit_count > 0 AND cache_miss_count = 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
+
+# --- on-disk cache reader takes the same warm path ---
+statement ok
+SET cache_httpfs_type='on_disk';
+
+statement ok
+SELECT cache_httpfs_clear_cache();
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE warmed) FROM (
+    SELECT cache_httpfs_cache_file(data_file) AS warmed FROM warm_manifest
+);
+----
+12	12
+
+query I
+SELECT COUNT(DISTINCT original_remote_path) FROM cache_httpfs_cache_status_query();
+----
+12
+
+statement ok
+SELECT cache_httpfs_clear_profile();
+
+query I
+SELECT COUNT(*) FROM read_parquet('/tmp/cache_httpfs_fake_filesystem/warm_many/*/*.parquet');
+----
+60000
+
+query I
+SELECT cache_hit_count > 0 AND cache_miss_count = 0
+FROM cache_httpfs_cache_access_info_query() WHERE cache_type = 'data';
+----
+true
