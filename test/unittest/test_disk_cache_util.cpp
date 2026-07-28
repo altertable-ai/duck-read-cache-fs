@@ -191,7 +191,7 @@ string WriteCacheFile(FileSystem &fs, const string &path, const string &content,
 
 } // namespace
 
-TEST_CASE("ReadLocalCacheFileRange reads requested offset into caller buffer", "[disk_cache_util]") {
+TEST_CASE("ReadLocalCacheFile reads requested offset into caller buffer", "[disk_cache_util]") {
 	const string test_dir =
 	    StringUtil::Format("/tmp/test_disk_cache_util_range_%s", UUID::ToString(UUID::GenerateRandomUUID()));
 	ScopedDirectory dir(test_dir);
@@ -201,12 +201,14 @@ TEST_CASE("ReadLocalCacheFileRange reads requested offset into caller buffer", "
 	const string path = WriteCacheFile(*fs, StringUtil::Format("%s/block.bin", test_dir), content, "v1");
 
 	string output(4, '\0');
-	REQUIRE(DiskCacheUtil::ReadLocalCacheFileRange(path, const_cast<char *>(output.data()), /*bytes_to_read=*/4,
-	                                               /*location=*/10, "v1"));
+	DiskCacheUtil::ReadOption options;
+	options.dest_buffer = const_cast<char *>(output.data());
+	auto result = DiskCacheUtil::ReadLocalCacheFile(path, /*read_offset=*/10, /*bytes_to_read=*/4, "v1", options);
+	REQUIRE(result.cache_hit);
 	REQUIRE(output == "klmn");
 }
 
-TEST_CASE("ReadLocalCacheFileRange supports EOF boundary and empty version tag", "[disk_cache_util]") {
+TEST_CASE("ReadLocalCacheFile supports EOF boundary and empty version tag", "[disk_cache_util]") {
 	const string test_dir =
 	    StringUtil::Format("/tmp/test_disk_cache_util_range_eof_%s", UUID::ToString(UUID::GenerateRandomUUID()));
 	ScopedDirectory dir(test_dir);
@@ -216,13 +218,15 @@ TEST_CASE("ReadLocalCacheFileRange supports EOF boundary and empty version tag",
 	const string path = WriteCacheFile(*fs, StringUtil::Format("%s/block.bin", test_dir), content, "v1");
 
 	string output(3, '\0');
+	DiskCacheUtil::ReadOption options;
+	options.dest_buffer = const_cast<char *>(output.data());
 	// Empty request version tag disables validation, so a tagged cache file still hits.
-	REQUIRE(DiskCacheUtil::ReadLocalCacheFileRange(path, const_cast<char *>(output.data()), /*bytes_to_read=*/3,
-	                                               /*location=*/7, ""));
+	auto result = DiskCacheUtil::ReadLocalCacheFile(path, /*read_offset=*/7, /*bytes_to_read=*/3, "", options);
+	REQUIRE(result.cache_hit);
 	REQUIRE(output == "789");
 }
 
-TEST_CASE("ReadLocalCacheFileRange deletes mismatched version and returns miss", "[disk_cache_util]") {
+TEST_CASE("ReadLocalCacheFile deletes mismatched version and returns miss", "[disk_cache_util]") {
 	const string test_dir =
 	    StringUtil::Format("/tmp/test_disk_cache_util_range_mismatch_%s", UUID::ToString(UUID::GenerateRandomUUID()));
 	ScopedDirectory dir(test_dir);
@@ -232,16 +236,20 @@ TEST_CASE("ReadLocalCacheFileRange deletes mismatched version and returns miss",
 	const string path = WriteCacheFile(*fs, StringUtil::Format("%s/block.bin", test_dir), content, "v1");
 
 	string output(5, '\0');
-	REQUIRE_FALSE(DiskCacheUtil::ReadLocalCacheFileRange(path, const_cast<char *>(output.data()), /*bytes_to_read=*/5,
-	                                                     /*location=*/0, "v2"));
+	DiskCacheUtil::ReadOption options;
+	options.dest_buffer = const_cast<char *>(output.data());
+	auto result = DiskCacheUtil::ReadLocalCacheFile(path, /*read_offset=*/0, /*bytes_to_read=*/5, "v2", options);
+	REQUIRE_FALSE(result.cache_hit);
 	REQUIRE_FALSE(fs->FileExists(path));
 }
 
-TEST_CASE("ReadLocalCacheFileRange returns miss for missing file", "[disk_cache_util]") {
+TEST_CASE("ReadLocalCacheFile returns miss for missing file", "[disk_cache_util]") {
 	string output(4, '\0');
-	REQUIRE_FALSE(DiskCacheUtil::ReadLocalCacheFileRange("/tmp/does-not-exist-cache-httpfs.bin",
-	                                                     const_cast<char *>(output.data()),
-	                                                     /*bytes_to_read=*/4, /*location=*/0, ""));
+	DiskCacheUtil::ReadOption options;
+	options.dest_buffer = const_cast<char *>(output.data());
+	auto result = DiskCacheUtil::ReadLocalCacheFile("/tmp/does-not-exist-cache-httpfs.bin", /*read_offset=*/0,
+	                                                /*bytes_to_read=*/4, "", options);
+	REQUIRE_FALSE(result.cache_hit);
 }
 
 TEST_CASE("ReadLocalCacheFile no longer updates timestamps on hit", "[disk_cache_util]") {
@@ -262,7 +270,8 @@ TEST_CASE("ReadLocalCacheFile no longer updates timestamps on hit", "[disk_cache
 	}
 
 	DiskCacheUtil::ReadOption options;
-	auto result = DiskCacheUtil::ReadLocalCacheFile(path, content.size(), /*version_tag=*/"", options);
+	auto result =
+	    DiskCacheUtil::ReadLocalCacheFile(path, /*read_offset=*/0, content.size(), /*version_tag=*/"", options);
 	REQUIRE(result.cache_hit);
 	REQUIRE(result.content.length == content.size());
 

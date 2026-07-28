@@ -132,40 +132,33 @@ void DiskCacheReader::ProcessCacheReadChunk(FileHandle &handle, const InstanceCo
 	const bool can_access_cache_file = state->CanAccessFile(cache_dest.dest_local_filepath);
 	if (can_access_cache_file) {
 		const auto latency_guard = collector.RecordOperationStart(IoOperation::kDiskCacheRead);
-		bool cache_hit = false;
+		// The whole block is only needed when it's going to be handed over to the in-memory cache; otherwise reading
+		// the whole block just to copy a fraction of it out costs a full block of IO per request, which is crippling
+		// for large block sizes.
+		const bool need_whole_block = in_mem_storage != nullptr;
+		const DiskCacheUtil::ReadOption read_options {
+		    // If on-disk in-memory cache is enabled, use direct IO to avoid double buffering.
+		    // Otherwise, rely on page cache for repeated access.
+		    .attempt_direct_io = config.enable_disk_reader_mem_cache,
+		    .dest_buffer = need_whole_block ? nullptr : cache_read_chunk.requested_start_addr,
+		};
+		const idx_t read_offset = need_whole_block ? 0 : cache_read_chunk.GetDeltaOffset();
+		const idx_t bytes_to_read = need_whole_block ? cache_read_chunk.chunk_size : cache_read_chunk.bytes_to_copy;
+		auto read_result = DiskCacheUtil::ReadLocalCacheFile(cache_dest.dest_local_filepath, read_offset, bytes_to_read,
+		                                                     version_tag, read_options);
+		if (read_result.cache_hit) {
+			collector.RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit, cache_read_chunk.bytes_to_copy);
+			DUCKDB_LOG_READ_CACHE_HIT((handle));
 
-		if (in_mem_storage == nullptr) {
-			// Disk-only mode: read the requested slice from the whole-file (or block) cache artifact.
-			const idx_t local_offset = cache_read_chunk.requested_start_offset - cache_read_chunk.aligned_start_offset;
-			cache_hit = DiskCacheUtil::ReadLocalCacheFileRange(
-			    cache_dest.dest_local_filepath, cache_read_chunk.requested_start_addr, cache_read_chunk.bytes_to_copy,
-			    local_offset, version_tag);
-			if (cache_hit) {
-				collector.RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit, cache_read_chunk.bytes_to_copy);
-				DUCKDB_LOG_READ_CACHE_HIT((handle));
-				if (state->cache_file_timestamp_throttle.ShouldTouch(cache_dest.dest_local_filepath)) {
-					UpdateFileTimestamps(cache_dest.dest_local_filepath);
-				}
-				return;
-			}
-		} else {
-			// Memory-cache mode intentionally needs the full aligned block for Put().
-			const DiskCacheUtil::ReadOption read_options {
-			    .attempt_direct_io = config.enable_disk_reader_mem_cache,
-			};
-			auto read_result = DiskCacheUtil::ReadLocalCacheFile(
-			    cache_dest.dest_local_filepath, cache_read_chunk.chunk_size, version_tag, read_options);
-			cache_hit = read_result.cache_hit;
-			if (cache_hit) {
-				collector.RecordCacheAccess(CacheEntity::kData, CacheAccess::kCacheHit, cache_read_chunk.bytes_to_copy);
-				DUCKDB_LOG_READ_CACHE_HIT((handle));
+			// Update in-memory cache if applicable; otherwise bytes already landed in the requested memory.
+			if (need_whole_block) {
 				cache_read_chunk.CopyBufferToRequestedMemory(read_result.content);
 				in_mem_storage->Put(block_key, std::move(read_result.content), version_tag);
-				if (state->cache_file_timestamp_throttle.ShouldTouch(cache_dest.dest_local_filepath)) {
-					UpdateFileTimestamps(cache_dest.dest_local_filepath);
-				}
-				return;
 			}
+			if (state->cache_file_timestamp_throttle.ShouldTouch(cache_dest.dest_local_filepath)) {
+				UpdateFileTimestamps(cache_dest.dest_local_filepath);
+			}
+			return;
 		}
 	}
 

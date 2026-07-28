@@ -234,15 +234,18 @@ void AddChunkedXattrEntries(unordered_map<string, string> &file_attrs, const cha
 }
 
 /*static*/ DiskCacheUtil::LocalCacheReadResult DiskCacheUtil::ReadLocalCacheFile(const string &cache_filepath,
-                                                                                 idx_t chunk_size,
+                                                                                 idx_t read_offset,
+                                                                                 idx_t bytes_to_read,
                                                                                  const string &version_tag,
                                                                                  const ReadOption &options) {
 	auto file_open_flags = FileOpenFlags::FILE_FLAGS_READ | FileOpenFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS;
 
-	// Enable direct IO when requested and size is page-aligned.
-	// PageAlignedDataChunk guarantees the buffer address and capacity are page-aligned.
+	// Enable direct IO when requested and both offset and size are page-aligned.
+	// PageAlignedDataChunk guarantees the buffer address and capacity are page-aligned, a caller-provided destination
+	// buffer doesn't, so direct IO is only an option when we allocate the buffer ourselves.
 	const idx_t page_size = GetFileSystemPageSize();
-	if (options.attempt_direct_io && chunk_size % page_size == 0) {
+	if (options.attempt_direct_io && options.dest_buffer == nullptr && bytes_to_read % page_size == 0 &&
+	    read_offset % page_size == 0) {
 		file_open_flags |= FileOpenFlags::FILE_FLAGS_DIRECT_IO;
 	}
 
@@ -262,38 +265,18 @@ void AddChunkedXattrEntries(unordered_map<string, string> &file_attrs, const cha
 		return LocalCacheReadResult {};
 	}
 
-	auto content = AllocatePageAlignedChunk(chunk_size);
-	local_filesystem.Read(*file_handle, content.data(), chunk_size, /*location=*/0);
-	content.length = chunk_size;
-
-	return LocalCacheReadResult {
-	    .cache_hit = true,
-	    .content = std::move(content),
-	};
-}
-
-/*static*/ bool DiskCacheUtil::ReadLocalCacheFileRange(const string &cache_filepath, char *buffer, idx_t bytes_to_read,
-                                                       idx_t location, const string &version_tag) {
-	if (bytes_to_read == 0) {
-		return true;
+	LocalCacheReadResult result;
+	result.cache_hit = true;
+	if (options.dest_buffer != nullptr) {
+		local_filesystem.Read(*file_handle, options.dest_buffer, bytes_to_read, read_offset);
+	} else {
+		result.content = AllocatePageAlignedChunk(bytes_to_read);
+		local_filesystem.Read(*file_handle, result.content.data(), bytes_to_read, read_offset);
+		result.content.length = bytes_to_read;
 	}
 
-	LocalFileSystem local_filesystem {};
-	auto file_handle = local_filesystem.OpenFile(cache_filepath, FileOpenFlags::FILE_FLAGS_READ |
-	                                                                 FileOpenFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
-
-	// Check cache validity and clear if necessary.
-	if (file_handle != nullptr && !ValidateCacheFile(cache_filepath, version_tag)) {
-		local_filesystem.TryRemoveFile(cache_filepath);
-		file_handle = nullptr;
-	}
-
-	if (file_handle == nullptr) {
-		return false;
-	}
-
-	local_filesystem.Read(*file_handle, buffer, /*nr_bytes=*/bytes_to_read, location);
-	return true;
+	// Callers that need LRU recency updates should touch timestamps separately (throttled in DiskCacheReader).
+	return result;
 }
 
 /*static*/ bool DiskCacheUtil::ValidateCacheFile(const string &cache_filepath, const string &version_tag) {
