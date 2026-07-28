@@ -25,6 +25,11 @@ struct CacheReadChunk {
 	// Number of bytes to copy from [content] to requested memory address.
 	idx_t bytes_to_copy = 0;
 
+	// Offset of the requested bytes within the block-aligned chunk.
+	idx_t GetDeltaOffset() const {
+		return requested_start_offset - aligned_start_offset;
+	}
+
 	// Copy from [buffer] to application-provided buffer.
 	void CopyBufferToRequestedMemory(const PageAlignedDataChunk &buffer);
 };
