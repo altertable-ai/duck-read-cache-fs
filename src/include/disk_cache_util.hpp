@@ -88,17 +88,22 @@ public:
 	struct ReadOption {
 		// Whether to attempt direct I/O when conditions allow.
 		bool attempt_direct_io = false;
+		// When set, bytes are read straight into this buffer instead of a freshly allocated chunk, which avoids both
+		// the allocation and a copy. Direct I/O is not used in this case, since the buffer isn't page-aligned.
+		char *dest_buffer = nullptr;
 	};
 	// Result of a local cache file read attempt.
 	struct LocalCacheReadResult {
 		bool cache_hit = false;
+		// Holds the bytes read, unless [ReadOption::dest_buffer] was provided.
 		PageAlignedDataChunk content;
 	};
 
-	// Attempt to open, validate, and read a local cache file at the already-resolved [cache_filepath].
+	// Attempt to open, validate, and read [bytes_to_read] bytes at [read_offset] from the local cache file at the
+	// already-resolved [cache_filepath].
 	// If the local cache file doesn't match the requested [version_tag], it will be deleted.
 	// Uses direct I/O when [options.attempt_direct_io] is true and conditions allow (avoids double buffering).
-	static LocalCacheReadResult ReadLocalCacheFile(const string &cache_filepath, idx_t chunk_size,
+	static LocalCacheReadResult ReadLocalCacheFile(const string &cache_filepath, idx_t read_offset, idx_t bytes_to_read,
 	                                               const string &version_tag, const ReadOption &options);
 
 	// Remove dead temporary cache files (write-to-temp-then-swap leftovers) under [cache_directories].
