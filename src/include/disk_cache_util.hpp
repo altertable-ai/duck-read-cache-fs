@@ -103,6 +103,7 @@ public:
 	// already-resolved [cache_filepath].
 	// If the local cache file doesn't match the requested [version_tag], it will be deleted.
 	// Uses direct I/O when [options.attempt_direct_io] is true and conditions allow (avoids double buffering).
+	// Does not update file timestamps; callers that need LRU recency updates should touch separately.
 	static LocalCacheReadResult ReadLocalCacheFile(const string &cache_filepath, idx_t read_offset, idx_t bytes_to_read,
 	                                               const string &version_tag, const ReadOption &options);
 

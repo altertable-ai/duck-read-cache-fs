@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <thread>
 
 using namespace duckdb; // NOLINT
@@ -38,6 +39,10 @@ public:
 	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override {
 		const int current_count = current_read_count.fetch_add(1) + 1;
 		UpdateMaxConcurrentReadCount(current_count);
+		{
+			const std::lock_guard<std::mutex> lck(thread_id_mutex);
+			last_read_thread_id = std::this_thread::get_id();
+		}
 
 		// Add delay to increase overlap between reads, so this test can catch
 		// over-parallelized fanout if the cap is not respected.
@@ -71,6 +76,11 @@ public:
 		return max_concurrent_read_count.load();
 	}
 
+	std::thread::id GetLastReadThreadId() const {
+		const std::lock_guard<std::mutex> lck(thread_id_mutex);
+		return last_read_thread_id;
+	}
+
 private:
 	void UpdateMaxConcurrentReadCount(int current_count) {
 		int max_count = max_concurrent_read_count.load();
@@ -84,6 +94,8 @@ private:
 	std::chrono::milliseconds per_read_delay;
 	std::atomic<int> current_read_count {0};
 	std::atomic<int> max_concurrent_read_count {0};
+	mutable std::mutex thread_id_mutex;
+	std::thread::id last_read_thread_id;
 };
 
 struct TestFsHelper {
@@ -153,6 +165,38 @@ int RunReadAndGetMaxConcurrency(const string &cache_type) {
 	return helper.slow_fs->GetMaxConcurrentReadCount();
 }
 
+void RunSingleBlockReadOnCallerThread(const string &cache_type) {
+	const string test_directory =
+	    StringUtil::Format("/tmp/cache_httpfs_inline_%s", UUID::ToString(UUID::GenerateRandomUUID()));
+	ScopedDirectory scoped_directory(test_directory);
+	const string source_path = StringUtil::Format("%s/source.data", scoped_directory.GetPath());
+	const string cache_dir = StringUtil::Format("%s/cache", scoped_directory.GetPath());
+
+	auto local_filesystem = LocalFileSystem::CreateLocal();
+	const string source_content = BuildTestFileContent();
+	{
+		auto file_handle = local_filesystem->OpenFile(source_path, FileOpenFlags::FILE_FLAGS_WRITE |
+		                                                               FileOpenFlags::FILE_FLAGS_FILE_CREATE_NEW);
+		local_filesystem->Write(*file_handle, const_cast<char *>(source_content.data()), source_content.size(), 0);
+		file_handle->Sync();
+		file_handle->Close();
+	}
+
+	auto slow_fs = make_uniq<SlowTrackingFileSystem>(std::chrono::milliseconds {0});
+	TestFsHelper helper(std::move(slow_fs), cache_type, cache_dir);
+	helper.instance_state->config.cache_block_size = TEST_FILE_SIZE;
+	helper.instance_state->cache_reader_manager.SetCacheReader(helper.instance_state->config, helper.instance_state);
+
+	auto *cache_fs = helper.cache_fs.get();
+	auto file_handle = cache_fs->OpenFile(source_path, FileOpenFlags::FILE_FLAGS_READ);
+	string read_output(BLOCK_SIZE, '\0');
+	const auto caller_thread_id = std::this_thread::get_id();
+	cache_fs->Read(*file_handle, const_cast<char *>(read_output.data()), read_output.size(), /*location=*/0);
+	REQUIRE(read_output == source_content.substr(0, BLOCK_SIZE));
+	REQUIRE(helper.slow_fs->GetLastReadThreadId() == caller_thread_id);
+	REQUIRE(helper.slow_fs->GetMaxConcurrentReadCount() == 1);
+}
+
 } // namespace
 
 TEST_CASE("Test max fanout subrequest on in-memory cache reader", "[max fanout subrequest]") {
@@ -163,4 +207,12 @@ TEST_CASE("Test max fanout subrequest on in-memory cache reader", "[max fanout s
 TEST_CASE("Test max fanout subrequest on on-disk cache reader", "[max fanout subrequest]") {
 	const int max_concurrency = RunReadAndGetMaxConcurrency("on_disk");
 	REQUIRE(max_concurrency <= MAX_FANOUT);
+}
+
+TEST_CASE("Single-block in-memory cache reads run on caller thread", "[max fanout subrequest]") {
+	RunSingleBlockReadOnCallerThread("in_mem");
+}
+
+TEST_CASE("Single-block on-disk cache reads run on caller thread", "[max fanout subrequest]") {
+	RunSingleBlockReadOnCallerThread("on_disk");
 }

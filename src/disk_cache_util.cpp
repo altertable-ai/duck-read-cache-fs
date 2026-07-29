@@ -275,11 +275,7 @@ void AddChunkedXattrEntries(unordered_map<string, string> &file_attrs, const cha
 		result.content.length = bytes_to_read;
 	}
 
-	// Update access and modification timestamp for the cache file, so it won't get evicted.
-	// Intentionally ignore the return value, since it's possible the cache file has been requested to
-	// delete by another eviction thread.
-	UpdateFileTimestamps(cache_filepath);
-
+	// Callers that need LRU recency updates should touch timestamps separately (throttled in DiskCacheReader).
 	return result;
 }
 

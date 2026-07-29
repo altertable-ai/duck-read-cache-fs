@@ -9,6 +9,7 @@
 
 #include "catch/catch.hpp"
 
+#include "cache_entry_info.hpp"
 #include "cache_filesystem_config.hpp"
 #include "disk_cache_reader.hpp"
 #include "duckdb/common/local_file_system.hpp"
@@ -670,5 +671,81 @@ TEST_CASE_METHOD(DiskCacheFilesystemFixture, "Test on lru eviction", "[on-disk c
 		REQUIRE(GetFileCountUnder(TEST_ON_DISK_CACHE_DIRECTORY) == 0);
 		REQUIRE(!LocalFileSystem::CreateLocal()->FileExists(existing_file_1));
 		REQUIRE(!LocalFileSystem::CreateLocal()->FileExists(existing_file_2));
+	}
+}
+
+// Whole-file cache blocks: a tiny cold read materializes one cache artifact for the entire remote object;
+// subsequent warm reads of disjoint ranges must not touch remote I/O.
+TEST_CASE("Whole-file on-disk cache serves warm range reads without remote IO", "[on-disk cache filesystem test]") {
+	constexpr idx_t FILE_SIZE = 26;
+	constexpr idx_t BLOCK_SIZE = 8ULL * 1024 * 1024 * 1024; // Larger than the source file.
+
+	LocalFileSystem::CreateLocal()->RemoveDirectory(TEST_ON_DISK_CACHE_DIRECTORY);
+	ScopedDirectory scoped_cache_dir(TEST_ON_DISK_CACHE_DIRECTORY);
+
+	auto mock_filesystem = make_uniq<MockFileSystem>(/*close_callback=*/[]() {}, /*dtor_callback=*/[]() {});
+	mock_filesystem->SetFileSize(FILE_SIZE);
+	auto *mock_filesystem_ptr = mock_filesystem.get();
+
+	TestCacheConfig config;
+	config.cache_type = "on_disk";
+	config.cache_block_size = BLOCK_SIZE;
+	config.cache_directories = {TEST_ON_DISK_CACHE_DIRECTORY};
+	config.enable_disk_reader_mem_cache = false;
+	config.profile_type = "temp";
+	config.internal_filesystem = std::move(mock_filesystem);
+	TestCacheFileSystemHelper helper(std::move(config));
+	auto *disk_cache_fs = helper.GetCacheFileSystem();
+
+	// Cold tiny read caches the complete remote object (chunk_size = file size).
+	{
+		auto handle = disk_cache_fs->OpenFile("filename", FileOpenFlags::FILE_FLAGS_READ);
+		string content(2, '\0');
+		disk_cache_fs->Read(*handle, const_cast<char *>(content.data()), /*nr_bytes=*/2, /*location=*/0);
+		REQUIRE(content == "aa");
+
+		auto read_operations = mock_filesystem_ptr->GetSortedReadOperations();
+		REQUIRE(read_operations.size() == 1);
+		REQUIRE(read_operations[0].start_offset == 0);
+		REQUIRE(read_operations[0].bytes_to_read == static_cast<int64_t>(FILE_SIZE));
+	}
+	REQUIRE(GetFileCountUnder(TEST_ON_DISK_CACHE_DIRECTORY) == 1);
+
+	auto &profiler = helper.GetProfileCollectorOrDefault();
+	CacheAccessInfo data_access_info;
+	for (const auto &info : profiler.GetCacheAccessInfo()) {
+		if (info.cache_type == "data") {
+			data_access_info = info;
+			break;
+		}
+	}
+	REQUIRE(data_access_info.cache_miss_count == 1);
+	REQUIRE(data_access_info.total_bytes_to_read.GetValue<uint64_t>() == 2);
+	REQUIRE(data_access_info.total_bytes_to_cache.GetValue<uint64_t>() == FILE_SIZE);
+
+	mock_filesystem_ptr->ClearReadOperations();
+
+	// Warm disjoint range reads must be served from the local cache artifact only.
+	{
+		auto handle = disk_cache_fs->OpenFile("filename", FileOpenFlags::FILE_FLAGS_READ);
+		string mid(3, '\0');
+		disk_cache_fs->Read(*handle, const_cast<char *>(mid.data()), /*nr_bytes=*/3, /*location=*/10);
+		REQUIRE(mid == "aaa");
+
+		string tail(4, '\0');
+		disk_cache_fs->Read(*handle, const_cast<char *>(tail.data()), /*nr_bytes=*/4, /*location=*/20);
+		REQUIRE(tail == "aaaa");
+	}
+
+	REQUIRE(mock_filesystem_ptr->GetSortedReadOperations().empty());
+	REQUIRE(GetFileCountUnder(TEST_ON_DISK_CACHE_DIRECTORY) == 1);
+
+	for (const auto &info : profiler.GetCacheAccessInfo()) {
+		if (info.cache_type == "data") {
+			REQUIRE(info.cache_hit_count == 2);
+			REQUIRE(info.total_bytes_to_read.GetValue<uint64_t>() == 2 + 3 + 4);
+			REQUIRE(info.total_bytes_to_cache.GetValue<uint64_t>() == FILE_SIZE + FILE_SIZE + FILE_SIZE);
+			break;
+		}
 	}
 }

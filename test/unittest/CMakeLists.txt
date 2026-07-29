@@ -24,6 +24,7 @@ set(CATCHFS_UNITTEST_OBJECTS
     test_disk_cache_filesystem_from_unit.cpp
     test_disk_cache_util.cpp
     test_disk_cache_validation_from_unit.cpp
+    test_file_access_timestamp_throttle.cpp
     test_disk_cache_with_multi_directories_from_unit.cpp
     test_exclusive_lru_cache.cpp
     test_exclusive_multi_lru_cache.cpp
@@ -63,9 +64,8 @@ if(NOT WIN32
     unittest_cache_httpfs test_helpers duckdb ${EXTENSION_NAME}
     ${OPENSSL_LIBRARIES} ${CURL_LIBRARIES})
 else()
-  target_link_libraries(
-    unittest_cache_httpfs test_helpers duckdb_static
-    ${OPENSSL_LIBRARIES} ${CURL_LIBRARIES})
+  target_link_libraries(unittest_cache_httpfs test_helpers duckdb_static
+                        ${OPENSSL_LIBRARIES} ${CURL_LIBRARIES})
   link_extension_libraries(unittest_cache_httpfs "")
 endif()
 
